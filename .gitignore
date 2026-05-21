@@ -1,0 +1,19 @@
+# built native artifacts (regenerate via packages/magewell/build_lib.sh)
+**/_lib/*.so
+
+# python build / packaging
+**/dist/
+**/build/
+*.whl
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# environment
+.venv/
+
+# Claude Code
+.claude/
+
+# build scratch
+**/linkstubs/

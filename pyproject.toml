@@ -1,0 +1,10 @@
+# uv workspace root (virtual — not itself a package).
+# Members are the individual packages installed into the shared .venv.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/magewell/tests"]

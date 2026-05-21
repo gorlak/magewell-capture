@@ -1,0 +1,6 @@
+MWCapture SDK Linux 3.3.1.1515
+libraries:
+  Lib/x64/libMWCapture.a    sha256:2fc1a5bbc5636dcf38e76db8c2f48b643aab23435fb61f89608fe4d221599281
+  Lib/arm64/libMWCapture.a  sha256:edd45bd43267cf3f5d8fd69997022d3ef8c24cdbacac881fa97bf5e4e369b095
+headers: Include/LibMWCapture/*.h
+retrieved: 2026-05-21 from magewell.com (official download)

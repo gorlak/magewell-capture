@@ -1,0 +1,19 @@
+# Magewell USB Capture — allow non-root access for the MWCapture SDK.
+#
+# The SDK reaches the device through two nodes that are root-only by default:
+#   1. the raw USB node   (/dev/bus/usb/BBB/DDD) — to enumerate and open the channel
+#   2. the HID interface  (/dev/hidrawN)         — for control/status transfers,
+#      e.g. reading the input signal (MWGetVideoSignalStatus)
+# Without (1), MWOpenChannelByPath fails with EACCES. With (1) but not (2), the
+# channel opens but every SDK call returns MW_FAILED. ffmpeg/V4L2 video capture
+# is unaffected — it uses /dev/videoN (group "video").
+#
+# Grants the "plugdev" group read-write on any Magewell (idVendor 2935) device;
+# the capture user must be in "plugdev".
+#
+#   Install:  sudo ./setup.sh        Remove:  sudo ./teardown.sh
+#
+# The udev approach mirrors ReproNim/reprostim's etc/udev/189-reprostim.rules
+# (MIT), extended here to cover the hidraw node. See ATTRIBUTIONS.md.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2935", MODE="0660", GROUP="plugdev"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2935", MODE="0660", GROUP="plugdev"

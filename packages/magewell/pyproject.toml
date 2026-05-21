@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magewell"
+version = "0.1.0"
+description = "ctypes wrapper around the Magewell MWCapture SDK (HDMI input signal detection)"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# the native lib is built per-box by build_lib.sh into src/magewell/_lib/
+magewell = ["_lib/*.so"]
