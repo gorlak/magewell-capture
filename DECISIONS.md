@@ -140,8 +140,7 @@ was assumed unnecessary) · spatial+temporal AQ on · AAC 192k · aresample asyn
 
 ## Phased plan
 
-- **Phase 1:** `magewell` ctypes binding → `capture.py` (detect → ffmpeg →
-  timestamped file in `~/captures`). Verify A/V sync + a long capture.
+- **Phase 1:** `magewell` ctypes binding → `capture.py` — **done**.
 - **Phase 2:** streaming monitor — ffmpeg tee → HLS in `/dev/shm/capture_monitor`;
   separate Python `http.server` on :8090; firewall to LAN.
 
@@ -156,18 +155,53 @@ was assumed unnecessary) · spatial+temporal AQ on · AAC 192k · aresample asyn
   `packages/magewell/udev/70-magewell.rules` (plugdev rw on idVendor 2935),
   applied via `sudo ./setup.sh`. ffmpeg/V4L2 capture is unaffected
   (`/dev/videoN`, group `video`).
+- **SDK version must match the device's USB interface layout.** SDK 3.3.1.1313
+  (from the ReproNim/reprostim mirror) failed with `USBDEVFS_CLAIMINTERFACE`
+  / `USBDEVFS_SUBMITURB` returning `ENOENT` — it targeted a USB
+  interface/endpoint that this Gen2 unit (fw `0x289f`) doesn't expose. Confirmed
+  via `strace`; failed identically even as root. The official **3.3.1.1515** from
+  magewell.com resolved it. Record the working SDK version; if upgrading the
+  device firmware or SDK, re-test.
+- **ALSA buffer xruns** (PipeWire contention). PipeWire is running and
+  occasionally contests the ALSA device, producing `ALSA buffer xrun` warnings
+  during capture. The `aresample=async=1000` filter absorbs these without audible
+  artifacts. If they become frequent on long captures, suspend PipeWire's hold
+  before capture: `pactl suspend-source <magewell_source> 1`. Or remove
+  PipeWire entirely (headless box, no other audio needs).
 - **No native 24p capture** (device limitation) — manage via Apple TV frame-rate setting.
-- PipeWire may claim the Magewell ALSA device → suspend or remove.
 - Power instability in TV room (slow POST) → consider UPS / line conditioning.
 - Use rear Intel xHCI USB 3.0 ports.
 - DV-timings detection N/A (UVC scaler) — detection is via the SDK.
 
+## First capture results (2026-05-21)
+
+5-second test capture from the live Apple TV feed:
+- Input detected: `1920x1080p59.946`, RGB, limited quant/sat, 2D progressive.
+- Audio: 48000 Hz / 16-bit LPCM, stereo.
+- Output: h264 High (NVENC CQ21 p6), yuv420p, ~25 Mbps; AAC LC 192k; `faststart`.
+- Encode speed: ~0.97x real-time on the T400.
+- File: `~/Downloads/capture_20260521_133407_1920x1080p59.946.mp4` (15.1 MB / 5s).
+- 3 initial frames dropped (startup transient), 2 ALSA xruns (PipeWire, absorbed).
+- **TODO:** verify A/V sync on a longer capture (10–15 min), check file size
+  trajectory (~5–15 GB/hour depending on content).
+
 ## Current status (2026-05-21)
 
-- Env verified; ffmpeg/NVENC/v4l-utils OK.
-- `libMWCapture.so` built natively + validated (plain ctypes load, device seen).
-- Repo scaffolded as a uv workspace; SDK vendored (3.3.1.1313) with license;
-  `magewell` package skeleton in place.
-- **Next:** write `packages/magewell/src/magewell/_sdk.py` — the ctypes binding
-  (`MWCAP_VIDEO_SIGNAL_STATUS` from the vendored header, the 7 prototypes,
-  `read_signal()`), then a live-signal test against the connected feed.
+**Phase 1 complete.** The full pipeline works end-to-end:
+- `magewell` package: ctypes binding to MWCapture SDK 3.3.1.1515, exposing
+  `read_signal()` (video: res/fps/interlace/color/quant/sat/frame-type),
+  `read_channel_info()` (device: family/serial/firmware), and
+  `read_audio_signal()` (audio: sample-rate/bits/channels/LPCM). 19 tests
+  (layout + setup + device), all green.
+- `scripts/capture.py`: probes signal via the SDK (with 1920×1080@60 fallback),
+  builds an ffmpeg command matching the detected format, runs it to a
+  timestamped file in `~/Downloads`. Handles SIGINT/SIGTERM gracefully.
+- `setup.sh`/`teardown.sh`: one-time privileged setup (udev rule for USB + hidraw
+  access), supervised and reversible.
+- SDK vendored (3.3.1.1515, official Magewell download) with x64 + arm64 `.a`,
+  all headers, license notice, `SOURCE.txt` with SHA256, and `build_lib.sh` that
+  auto-detects the host architecture.
+- uv workspace, `.venv`, editable install, pytest wired.
+
+**Next:** Phase 2 (streaming monitor), longer capture testing, and optionally a
+`systemd` service for unattended capture.

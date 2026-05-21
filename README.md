@@ -42,10 +42,25 @@ uv sync
 # run the tests (layout tests always run; device tests need the Magewell attached)
 uv run pytest
 
-# run a capture script against the venv
-.venv/bin/python scripts/capture.py
+# capture (runs until Ctrl-C; use -d for a timed capture)
+.venv/bin/python scripts/capture.py            # until Ctrl-C
+.venv/bin/python scripts/capture.py -d 60      # 60-second capture
+.venv/bin/python scripts/capture.py -o /tmp    # custom output dir (default: ~/Downloads)
 # (optional) expose on PATH:  ln -s "$PWD/scripts/capture.py" ~/.local/bin/capture
 ```
 
 The native `libMWCapture.so` is built per-box from the vendored SDK archive and
 is gitignored; everything needed to rebuild it is committed.
+
+## How it works
+
+1. `capture.py` probes the live HDMI input via the `magewell` binding (SDK
+   reads the true input resolution, frame rate, and interlace status).
+2. If a locked signal is detected, ffmpeg is launched with matching parameters;
+   otherwise it falls back to 1920×1080@60.
+3. Video: V4L2 YUYV 4:2:2 → nv12 → h264_nvenc (VBR CQ21, preset p6,
+   spatial + temporal AQ, 80M ceiling). Audio: direct ALSA → AAC 192k.
+4. Output: timestamped MP4 with `faststart` (e.g.
+   `capture_20260521_143022_1920x1080p59.946.mp4`).
+5. Ctrl-C (SIGINT) triggers a clean ffmpeg shutdown — the file is finalized and
+   playable.
