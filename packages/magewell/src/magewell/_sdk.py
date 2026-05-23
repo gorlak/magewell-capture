@@ -424,10 +424,25 @@ def read_signal(index: int = 0) -> Signal:
         finally:
             lib.MWCloseChannel(handle)
 
+    state = SignalState(vss.state)
     dur = int(vss.dwFrameDuration)
     fps = round(10_000_000 / dur, 3) if dur else 0.0
+
+    # When the signal is not locked the struct fields contain garbage —
+    # only parse enum fields if we have a valid signal.
+    if state is SignalState.LOCKED:
+        color_format = VideoColorFormat(vss.colorFormat)
+        quant_range = VideoQuantizationRange(vss.quantRange)
+        sat_range = VideoSaturationRange(vss.satRange)
+        frame_type = VideoFrameType(vss.frameType)
+    else:
+        color_format = VideoColorFormat.UNKNOWN
+        quant_range = VideoQuantizationRange.UNKNOWN
+        sat_range = VideoSaturationRange.UNKNOWN
+        frame_type = VideoFrameType.FRAME_2D
+
     return Signal(
-        state=SignalState(vss.state),
+        state=state,
         width=int(vss.cx),
         height=int(vss.cy),
         fps=fps,
@@ -435,10 +450,10 @@ def read_signal(index: int = 0) -> Signal:
         aspect_x=int(vss.nAspectX),
         aspect_y=int(vss.nAspectY),
         frame_duration_100ns=dur,
-        color_format=VideoColorFormat(vss.colorFormat),
-        quant_range=VideoQuantizationRange(vss.quantRange),
-        sat_range=VideoSaturationRange(vss.satRange),
-        frame_type=VideoFrameType(vss.frameType),
+        color_format=color_format,
+        quant_range=quant_range,
+        sat_range=sat_range,
+        frame_type=frame_type,
         segmented_frame=vss.bSegmentedFrame,
     )
 

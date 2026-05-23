@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capture Monitor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #video-container {
+    position: relative;
+    width: 100%;
+    max-width: 1280px;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  video {
+    width: 100%;
+    max-height: calc(100vh - 80px);
+    background: #000;
+  }
+  #status-badge {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    padding: 6px 16px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  #status-badge.standby {
+    background: rgba(80, 80, 80, 0.85);
+    color: #ccc;
+  }
+  #status-badge.recording {
+    background: rgba(220, 38, 38, 0.9);
+    color: #fff;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+  #timecode {
+    position: absolute;
+    bottom: 16px;
+    left: 16px;
+    font-size: 16px;
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 4px 10px;
+    border-radius: 4px;
+  }
+  #timecode .rec-time {
+    color: #f87171;
+    margin-left: 12px;
+  }
+  #controls {
+    width: 100%;
+    max-width: 1280px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 16px;
+    height: 80px;
+  }
+  #record-btn {
+    padding: 12px 36px;
+    font-size: 16px;
+    font-weight: 700;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  #record-btn.standby {
+    background: #dc2626;
+    color: #fff;
+  }
+  #record-btn.standby:hover {
+    background: #ef4444;
+  }
+  #record-btn.recording {
+    background: #555;
+    color: #fff;
+  }
+  #record-btn.recording:hover {
+    background: #666;
+  }
+  #segment-count {
+    font-size: 13px;
+    color: #888;
+  }
+  #error-msg {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #888;
+    font-size: 18px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="video-container">
+  <video id="player" muted autoplay playsinline></video>
+  <div id="status-badge" class="standby">STANDBY</div>
+  <div id="timecode">
+    <span id="elapsed">00:00:00</span>
+    <span id="rec-elapsed" class="rec-time"></span>
+  </div>
+  <div id="error-msg">Connecting to stream...</div>
+</div>
+
+<div id="controls">
+  <button id="mute-btn" style="padding:12px 20px;font-size:14px;border:none;border-radius:6px;cursor:pointer;background:#444;color:#fff">Unmute</button>
+  <button id="record-btn" class="standby">Record</button>
+  <span id="segment-count"></span>
+</div>
+
+<script>
+(function() {
+  const video = document.getElementById('player');
+  const badge = document.getElementById('status-badge');
+  const elapsedEl = document.getElementById('elapsed');
+  const recElapsedEl = document.getElementById('rec-elapsed');
+  const recordBtn = document.getElementById('record-btn');
+  const segCountEl = document.getElementById('segment-count');
+  const errorMsg = document.getElementById('error-msg');
+
+  let currentState = 'STANDBY';
+  let mediaSource = null;
+  let sourceBuffer = null;
+  let queue = [];
+  let appending = false;
+
+  // ---- WebSocket + MSE setup ----
+  function initPlayer() {
+    if (!('MediaSource' in window)) {
+      errorMsg.textContent = 'MediaSource API not supported in this browser';
+      return;
+    }
+
+    mediaSource = new MediaSource();
+    video.src = URL.createObjectURL(mediaSource);
+
+    mediaSource.addEventListener('sourceopen', function() {
+      // Try codec strings from most to least specific.
+      // Our stream is HEVC Main 10, Level 4.0 (1080p60), AAC-LC.
+      // hev1 first — ffmpeg outputs hev1 (parameter sets in-band)
+      var codecs = [
+        'video/mp4; codecs="hev1.2.4.L120.B0,mp4a.40.2"',  // Main 10, L4.0
+        'video/mp4; codecs="hvc1.2.4.L120.B0,mp4a.40.2"',  // hvc1 variant
+        'video/mp4; codecs="hev1.2.4.L120.B0"',             // video only
+        'video/mp4; codecs="hev1"',                          // minimal
+      ];
+      var chosen = null;
+      for (var i = 0; i < codecs.length; i++) {
+        if (MediaSource.isTypeSupported(codecs[i])) {
+          chosen = codecs[i];
+          break;
+        }
+      }
+      if (!chosen) {
+        errorMsg.textContent = 'HEVC not supported via MSE in this browser. Try Safari.';
+        console.error('No supported HEVC codec string found');
+        codecs.forEach(function(c) { console.log('  ' + c + ': ' + MediaSource.isTypeSupported(c)); });
+        return;
+      }
+      console.log('MSE codec: ' + chosen);
+      sourceBuffer = mediaSource.addSourceBuffer(chosen);
+      sourceBuffer.mode = 'segments';
+      sourceBuffer.addEventListener('updateend', flushQueue);
+      connectWebSocket();
+    });
+  }
+
+  function flushQueue() {
+    if (queue.length === 0 || !sourceBuffer || sourceBuffer.updating) {
+      appending = false;
+      return;
+    }
+    appending = true;
+    const chunk = queue.shift();
+    try {
+      sourceBuffer.appendBuffer(chunk);
+    } catch (e) {
+      // QuotaExceededError — evict old data
+      if (e.name === 'QuotaExceededError' && sourceBuffer.buffered.length > 0) {
+        const start = sourceBuffer.buffered.start(0);
+        const end = sourceBuffer.buffered.end(0);
+        if (end - start > 10) {
+          sourceBuffer.remove(start, end - 5);
+        }
+      }
+    }
+  }
+
+  function appendChunk(data) {
+    queue.push(data);
+    if (!appending && sourceBuffer && !sourceBuffer.updating) {
+      flushQueue();
+    }
+  }
+
+  function connectWebSocket() {
+    var wsPort = parseInt(location.port || '8090') + 1;
+    var wsUrl = 'ws://' + location.hostname + ':' + wsPort;
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function() {
+      errorMsg.style.display = 'none';
+    };
+
+    ws.onmessage = function(event) {
+      appendChunk(new Uint8Array(event.data));
+
+      // auto-play once we have data
+      if (video.paused) {
+        video.play().catch(function() {});
+      }
+
+      // keep playback near live edge: if buffered and behind, skip forward
+      try {
+        if (sourceBuffer && !sourceBuffer.updating &&
+            mediaSource.readyState === 'open' &&
+            sourceBuffer.buffered.length > 0) {
+          const bufEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+          if (bufEnd - video.currentTime > 2.0) {
+            video.currentTime = bufEnd - 0.3;
+          }
+        }
+      } catch (e) {}  // ignore InvalidStateError during transitions
+    };
+
+    ws.onclose = function() {
+      errorMsg.textContent = 'Stream disconnected. Reconnecting...';
+      errorMsg.style.display = 'block';
+      setTimeout(connectWebSocket, 2000);
+    };
+
+    ws.onerror = function() {
+      ws.close();
+    };
+  }
+
+  initPlayer();
+
+  // ---- mute toggle ----
+  var muteBtn = document.getElementById('mute-btn');
+  muteBtn.addEventListener('click', function() {
+    video.muted = !video.muted;
+    video.volume = 1.0;
+    muteBtn.textContent = video.muted ? 'Unmute' : 'Mute';
+    console.log('muted=' + video.muted + ' volume=' + video.volume);
+  });
+
+  // ---- status polling ----
+  function formatTime(secs) {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    return [h, m, s].map(function(v) { return String(v).padStart(2, '0'); }).join(':');
+  }
+
+  async function pollStatus() {
+    var data = await apiCall('/api/status');
+    if (!data) return;
+    updateUI(data);
+    if (data.recording_elapsed !== null) {
+      recElapsedEl.textContent = 'REC ' + formatTime(data.recording_elapsed);
+    } else {
+      recElapsedEl.textContent = '';
+    }
+  }
+
+  setInterval(pollStatus, 500);
+  pollStatus();
+
+  // ---- timecode display (from video.currentTime) ----
+  function updateTimecode() {
+    if (video.currentTime > 0) {
+      elapsedEl.textContent = formatTime(video.currentTime);
+    }
+    requestAnimationFrame(updateTimecode);
+  }
+  requestAnimationFrame(updateTimecode);
+
+
+  // ---- record button ----
+  async function apiCall(path) {
+    try {
+      var res = await fetch(path);
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return null;
+  }
+
+  function updateUI(data) {
+    if (!data) return;
+    currentState = data.state;
+    if (data.state === 'RECORDING') {
+      recordBtn.textContent = 'Stop';
+      recordBtn.className = 'recording';
+      badge.textContent = 'RECORDING';
+      badge.className = 'recording';
+    } else {
+      recordBtn.textContent = 'Record';
+      recordBtn.className = 'standby';
+      badge.textContent = 'STANDBY';
+      badge.className = 'standby';
+    }
+    if (data.segments && data.segments.length > 0) {
+      segCountEl.textContent = data.segments.length + ' segment(s) marked';
+    }
+  }
+
+  recordBtn.addEventListener('click', async function() {
+    var endpoint = currentState === 'RECORDING'
+      ? '/api/mark-out'
+      : '/api/mark-in';
+    var streamTime = video.currentTime || 0;
+    var data = await apiCall(endpoint + '?t=' + streamTime.toFixed(3));
+    updateUI(data);
+  });
+
+  // ---- keyboard shortcut: space to toggle record ----
+  document.addEventListener('keydown', function(e) {
+    if (e.code === 'Space' && e.target === document.body) {
+      e.preventDefault();
+      recordBtn.click();
+    }
+  });
+})();
+</script>
+
+</body>
+</html>

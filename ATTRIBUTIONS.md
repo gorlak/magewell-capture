@@ -37,3 +37,13 @@ reprostim is also the source mirror for the vendored Magewell SDK above.
 
 Our `magewell` ctypes binding, `setup.sh` / `teardown.sh`, and the test suite are
 original implementations.
+
+## Test fixtures
+
+### avsync.ts — A/V sync test pattern
+- **Location:** `tests/fixtures/avsync.ts`
+- **Source:** https://www.w6rz.net/
+- **Format:** MPEG-2 720p60 + AC3 stereo, ~32 seconds, MPEG-TS container.
+- **Purpose:** frame-counted visual flashes with aligned audio beeps for
+  verifying A/V synchronization. Fed on a loop via v4l2loopback for drift
+  detection over arbitrary durations.

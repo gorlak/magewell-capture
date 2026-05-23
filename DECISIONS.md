@@ -119,30 +119,144 @@ bump pointer; old retained for reproducibility. The **built `.so` is gitignored*
 
 ---
 
-## Capture pipeline (target ffmpeg behavior)
+## Capture pipeline
 
-- Single NVENC encode, file output (Phase 1); later tee to HLS in `/dev/shm` (Phase 2).
+### Encode settings
 - Video in: V4L2 `/dev/video0`, `yuyv422`, detected (or fallback) W×H + fps → convert to nv12.
 - Audio in: **direct ALSA** `hw:CARD=HDMI,DEV=0` (not PipeWire). PipeWire is
   running → may need `pactl suspend-source` on the Magewell source before capture.
-- Encode: `h264_nvenc -preset p6 -rc vbr -cq 21 -b:v 0 -maxrate 80M -bufsize 160M
-  -profile:v high -spatial-aq 1 -temporal-aq 1`, GOP = 2×fps.
+- Encode: `hevc_nvenc -preset p6 -rc vbr -cq 21 -b:v 0 -maxrate 80M -bufsize 160M
+  -profile:v main10 -spatial-aq 1`, GOP = 2×fps.
 - Audio: `aac -b:a 192k -af aresample=async=1000`.
 - Interlaced SD: detect via SDK `bInterlaced`; deinterlace policy (bwdif/yadif vs
   preserve-interlaced) is an **open question** for the archival path.
 
-### Quality settings rationale (unchanged except pix_fmt)
-h264_nvenc (mature, compatible) · VBR CQ21 (content-adaptive, transparent) ·
-preset p6 · maxrate 80M ceiling · **input yuyv422 → nv12** (conversion required,
-was assumed unnecessary) · spatial+temporal AQ on · AAC 192k · aresample async.
+### Codec choice: HEVC over H.264
+Switched from `h264_nvenc` (Phase 1 testing) to `hevc_nvenc` for ~20% bitrate
+savings at equivalent quality. Main10 profile chosen over Main — it's a superset,
+universally supported, and gives the encoder more internal precision even with
+8-bit input. **Temporal AQ is not supported** on the T400 (Turing) for HEVC —
+only spatial AQ is used. Tested: 1080p59.94 encodes at ~20 Mbps CQ21 (~10 GB/hr),
+~0.999x realtime on the T400.
+
+### ALSA timestamps
+Do **not** use `-use_wallclock_as_timestamps` on the ALSA audio input. ALSA
+provides accurate timestamps from the hardware sample counter; overriding with
+wall clock causes mis-timestamped bursts that `aresample=async` turns into silence
+gaps (audio plays a few samples then drops out). Wallclock timestamps are correct
+for the V4L2 video input only.
+
+### Quality settings rationale
+hevc_nvenc (better compression, broad support) · VBR CQ21 (content-adaptive,
+transparent) · preset p6 · maxrate 80M ceiling · **input yuyv422 → nv12**
+(conversion required) · spatial AQ on · AAC 192k · aresample async.
 
 ---
 
 ## Phased plan
 
 - **Phase 1:** `magewell` ctypes binding → `capture.py` — **done**.
-- **Phase 2:** streaming monitor — ffmpeg tee → HLS in `/dev/shm/capture_monitor`;
-  separate Python `http.server` on :8090; firewall to LAN.
+- **Phase 2:** monitored capture with browser-based preview and record control — see below.
+
+---
+
+## Phase 2: Monitored capture (`scripts/monitor.py`)
+
+### Overview
+A separate script from `capture.py` (which is preserved for simple one-shot
+captures and diagnostics). `monitor.py` provides continuous capture with a
+browser-based preview and record in/out control.
+
+### Architecture: always-capture, mark-and-extract
+
+1. **ffmpeg runs continuously** from start with two outputs (dual encode):
+   - **Output 1:** MP4 file on disk with `faststart` (the recording, ~16 Mbps)
+   - **Output 2:** fragmented MP4 to pipe (`frag_keyframe+empty_moov`) for
+     WebSocket+MSE preview in the browser
+   Uses two NVENC sessions (T400 supports 3 concurrent). The tee muxer was
+   rejected because it doesn't forward codec extradata (produces empty `hvcC`
+   in the fMP4 init segment, which MSE rejects — see "Findings" below).
+
+2. **Python async server** (`websockets` library) on `:8090`, serving:
+   - WebSocket stream: fMP4 data from ffmpeg pipe → broadcast to browser clients
+   - Static web UI (the monitor page)
+   - JSON API for record control (`/api/mark-in?t=N`, `/api/mark-out?t=N`,
+     `/api/status`)
+
+3. **Web UI** (single HTML page, no build step):
+   - HEVC video via **WebSocket + Media Source Extensions** (MSE). The browser
+     receives fMP4 fragments over WebSocket and feeds them to a `<video>`
+     element via MSE's SourceBuffer API. ~3s latency (one GOP).
+   - **RECORD / STOP button** — sends `GET /api/mark-in?t=<video.currentTime>`
+     (stream time from the player, so cuts match what the user saw on screen)
+   - **Status badge**: STANDBY (grey) or RECORDING (red, pulsing)
+   - **Timecode display** showing `video.currentTime` (stream position)
+   - **Mute/Unmute button** (autoplay requires muted; user clicks to unmute)
+   - **Spacebar** keyboard shortcut for record toggle
+   - Safari is the primary target; Firefox HEVC+MSE is unreliable
+
+4. **In/out point tracking:** uses `video.currentTime` from the browser — the
+   stream position of the frame currently displayed. This means cuts match
+   what the user saw regardless of preview latency. The server stores
+   `(in_time, out_time)` pairs in stream seconds.
+
+5. **Post-capture segment extraction:** on SIGINT (Ctrl-C), ffmpeg shuts down
+   gracefully, then Python extracts each marked segment with
+   `ffmpeg -ss <in> -to <out> -c copy <output>` — pure stream copy, no
+   re-encode, nearly instant. The continuous session MP4 is retained.
+
+### Findings during implementation
+
+- **ffmpeg tee muxer loses codec extradata.** The tee muxer doesn't forward
+  HEVC VPS/SPS/PPS to slave muxers. The fMP4 init segment has an empty
+  `hvcC` box (8 bytes, header only). MSE requires a populated `hvcC` to
+  initialize the decoder. Direct output (no tee) works correctly. Workaround:
+  dual ffmpeg outputs (2 NVENC sessions) instead of tee.
+- **`empty_moov` is required for fMP4/MSE** — without it, ffmpeg writes a
+  regular moov with full sample tables (no `mvex`), which MSE rejects.
+  With `empty_moov`, the moov has proper fMP4 structure (empty stbl, mvex
+  with trex). For direct output (no tee), `empty_moov` still populates the
+  `hvcC` because NVENC provides extradata during encoder initialization.
+- **HEVC MSE codec strings:** Safari uses `hev1.2.4.L120.B0` (Main 10,
+  Level 4.0) for HEVC in fMP4. ffmpeg outputs `hev1` format (parameter sets
+  in-band), not `hvc1`. Using the wrong codec string (`hvc1` when stream is
+  `hev1`) causes silent decode failure.
+- **Hand-rolled WebSocket failed in browsers.** A raw asyncio HTTP+WebSocket
+  server with correct RFC 6455 implementation (verified: accept key, response
+  format, hex dump) was rejected by both Safari ("cannot parse response") and
+  Firefox (code 1006) despite passing in-process tests. The `websockets`
+  library (v16) works immediately. Root cause not fully determined — likely
+  subtle HTTP/1.1 framing or buffering behavior that browsers are strict about.
+- **Double SIGINT corrupts MP4 faststart.** When the user presses Ctrl-C,
+  ffmpeg receives SIGINT from the terminal process group. If Python also sends
+  SIGINT, the second signal interrupts ffmpeg during the moov-to-front second
+  pass, producing a file with no moov. Fix: `capture.py` ignores SIGINT
+  (lets ffmpeg handle it); `monitor.py` tracks which signal was received and
+  only forwards SIGTERM.
+- **fMP4 fragment latency:** `frag_keyframe` with a 2-second GOP produces
+  ~3s preview latency (one GOP buffered before first fragment emits, plus
+  network/decode). Acceptable for monitoring. Could be reduced by shortening
+  the preview output's GOP independently.
+
+### Why this design (alternatives rejected)
+
+- **Restart ffmpeg on record start/stop:** brittle, causes preview glitches,
+  risk of lost frames at transitions.
+- **HLS instead of WebSocket+MSE:** 6+ seconds latency due to segment
+  buffering and playlist polling. Too slow for monitoring fast-cut content.
+- **RTSP:** low latency (~0.5s) but no browser support — would require VLC.
+- **ffmpeg tee muxer:** doesn't forward codec extradata to slave muxers,
+  producing invalid fMP4 for MSE. Dual encode (2 NVENC sessions) works.
+- **Hand-rolled WebSocket server:** browsers reject it despite correct
+  protocol implementation. The `websockets` library handles edge cases.
+- **PyAV / libav bindings:** unnecessary complexity for this pipeline.
+
+### Script separation
+`capture.py` — simple one-shot capture, no server, no preview. Kept for quick
+testing and diagnostics (e.g. `capture.py --duration 5`).
+`monitor.py` — monitored capture with browser preview and record control.
+Both share `capture_shared.py` (ffmpeg command builders, signal probe, path
+generation).
 
 ## Known issues / watch-for
 
@@ -173,21 +287,31 @@ was assumed unnecessary) · spatial+temporal AQ on · AAC 192k · aresample asyn
 - Use rear Intel xHCI USB 3.0 ports.
 - DV-timings detection N/A (UVC scaler) — detection is via the SDK.
 
-## First capture results (2026-05-21)
+## Capture test results (2026-05-21)
 
-5-second test capture from the live Apple TV feed:
+### H.264 (Phase 1 initial test)
 - Input detected: `1920x1080p59.946`, RGB, limited quant/sat, 2D progressive.
 - Audio: 48000 Hz / 16-bit LPCM, stereo.
 - Output: h264 High (NVENC CQ21 p6), yuv420p, ~25 Mbps; AAC LC 192k; `faststart`.
 - Encode speed: ~0.97x real-time on the T400.
-- File: `~/Downloads/capture_20260521_133407_1920x1080p59.946.mp4` (15.1 MB / 5s).
+- File: 15.1 MB / 5s.
 - 3 initial frames dropped (startup transient), 2 ALSA xruns (PipeWire, absorbed).
-- **TODO:** verify A/V sync on a longer capture (10–15 min), check file size
-  trajectory (~5–15 GB/hour depending on content).
+
+### HEVC (current)
+- 5-second test: HEVC Main 10, ~20 Mbps CQ21, 14.2 MB (vs 15.1 MB H.264). No xruns.
+- **Audio fix applied:** removed `-use_wallclock_as_timestamps` from ALSA input —
+  was causing corrupted audio (a few samples every ~200ms, rest silence). See
+  "ALSA timestamps" above.
+- **Temporal AQ removed:** T400 does not support temporal AQ for HEVC
+  (`hevc_nvenc` fails at encoder init). Spatial AQ only.
+- 60-second test: 3595 frames, 167.1 MB (~20 Mbps avg), steady 0.999x realtime,
+  no xruns or errors. Projected ~10 GB/hour.
 
 ## Current status (2026-05-21)
 
-**Phase 1 complete.** The full pipeline works end-to-end:
+**Phase 1 complete. Phase 2 designed, ready to implement.**
+
+Phase 1 deliverables:
 - `magewell` package: ctypes binding to MWCapture SDK 3.3.1.1515, exposing
   `read_signal()` (video: res/fps/interlace/color/quant/sat/frame-type),
   `read_channel_info()` (device: family/serial/firmware), and
@@ -195,7 +319,8 @@ was assumed unnecessary) · spatial+temporal AQ on · AAC 192k · aresample asyn
   (layout + setup + device), all green.
 - `scripts/capture.py`: probes signal via the SDK (with 1920×1080@60 fallback),
   builds an ffmpeg command matching the detected format, runs it to a
-  timestamped file in `~/Downloads`. Handles SIGINT/SIGTERM gracefully.
+  timestamped file in `~/Downloads`. HEVC Main10 NVENC. Handles SIGINT/SIGTERM
+  gracefully. Preserved as a simple one-shot tool for testing/diagnostics.
 - `setup.sh`/`teardown.sh`: one-time privileged setup (udev rule for USB + hidraw
   access), supervised and reversible.
 - SDK vendored (3.3.1.1515, official Magewell download) with x64 + arm64 `.a`,
@@ -203,5 +328,117 @@ was assumed unnecessary) · spatial+temporal AQ on · AAC 192k · aresample asyn
   auto-detects the host architecture.
 - uv workspace, `.venv`, editable install, pytest wired.
 
-**Next:** Phase 2 (streaming monitor), longer capture testing, and optionally a
-`systemd` service for unattended capture.
+**Next:** implement Phase 2 (`scripts/monitor.py` — browser-based monitored
+capture with HLS preview and record in/out control).
+
+---
+
+## Test strategy
+
+Tests are organized into three tiers based on what they require to run.
+
+### Tier 1: Unit tests (CI — GitHub Actions)
+
+Pure logic, no hardware, no kernel modules, no GPU. These run on every push.
+
+- **Struct layout tripwires** (existing) — `ctypes.sizeof` / field offset checks
+  against SDK header constants.
+- **ffmpeg command builder** — given (width, height, fps, interlaced, output),
+  assert the correct argv is produced. Covers: HEVC settings, tee muxer output
+  format, HLS options, ALSA timestamps not present on audio input, NTSC
+  framerate ratio mapping, fallback values.
+- **State machine** — STANDBY → RECORDING → STANDBY transitions, edge cases
+  (double mark-in, mark-out without mark-in, etc.).
+- **In/out point bookkeeping** — adding points, listing them, timestamps are
+  monotonic, pairing logic.
+- **Extraction command builder** — given a list of (in, out) pairs and a source
+  file, assert correct `ffmpeg -ss -to -c copy` argv for each segment.
+- **HTTP API routing** — test request/response for `/api/mark-in`,
+  `/api/mark-out`, `/api/status` against the server handler directly (no
+  network), using aiohttp test client or similar.
+
+### Tier 2: Virtual device integration (local — any Linux box)
+
+Requires kernel modules (`v4l2loopback`, `snd-aloop`) but **not** the Magewell
+or NVIDIA GPU. Uses software encoders (`libx265`/`libx264`) as a fallback.
+Tests the actual ffmpeg pipeline end-to-end with virtual devices.
+
+Setup:
+```
+sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="Test"
+sudo modprobe snd-aloop index=10
+ffmpeg -re -stream_loop -1 -i test/fixtures/test_card.mp4 \
+  -f v4l2 -pix_fmt yuyv422 /dev/video10 \
+  -f alsa hw:Loopback,0
+```
+
+What this covers:
+- Full capture pipeline (input → encode → mux → file), just with virtual devices
+  and software encode.
+- HLS output: segments appear in `/dev/shm`, playlist is valid.
+- Segment extraction: in/out → `ffmpeg -c copy` → output files are playable.
+- HTTP server: HLS segments are served, API responds correctly.
+- End-to-end browser preview (manual — open in Safari/Firefox).
+
+What this does **not** cover:
+- NVENC encoding (needs GPU).
+- Real USB device timing, xruns, signal detection.
+
+Tests in this tier are marked `@pytest.mark.virtual_device` and skipped if the
+loopback devices are not present.
+
+### Tier 3: Hardware tests (capture box only)
+
+Requires the Magewell device, NVIDIA GPU, and a live HDMI signal. Run manually
+on the capture box (`pytest -m device`). The existing `requires_device` skip
+pattern is already in place.
+
+What this covers:
+- SDK signal detection (resolution, fps, interlace, color, audio).
+- NVENC encoding at full quality.
+- Real ALSA timing and xrun behavior.
+- A/V sync on actual captured files.
+
+### Pytest markers and CI configuration
+
+Markers:
+- (unmarked) — Tier 1, runs everywhere including CI.
+- `@pytest.mark.virtual_device` — Tier 2, skipped without loopback modules.
+- `@pytest.mark.device` (existing `requires_device`) — Tier 3, skipped without
+  Magewell hardware.
+
+CI runs **Tier 1 only**: `pytest -m "not virtual_device and not device"`.
+
+### CI portability (GitHub Actions now, Codeberg/Woodpecker later)
+
+The CI configuration is kept deliberately portable — no platform-specific
+features that can't be trivially replicated elsewhere. The repo may move to
+Codeberg (Woodpecker CI, Docker-based YAML config).
+
+Principles:
+- **The test command is the entire contract:**
+  `uv sync && uv run pytest -m "not virtual_device and not device"`.
+  Same command on any CI, any Linux container.
+- **No marketplace actions** beyond `actions/checkout`. Install uv via
+  `pipx install uv` or `curl`, not `astral-sh/setup-uv`. Woodpecker has no
+  action marketplace equivalent.
+- **No GitHub-specific API usage** in CI (no `GITHUB_TOKEN`, no
+  `github.event` context, no status checks API). If we need CI status badges,
+  use the generic endpoint both platforms expose.
+- **Base image: any Debian/Ubuntu with Python 3.13, g++, make.** The `.so`
+  build (`build_lib.sh`) needs `g++` and the vendored `.a` — no exotic deps.
+- **Single CI file at repo root** (`.github/workflows/test.yml` for now;
+  `.woodpecker.yml` equivalent is a ~10 line translation when the time comes).
+
+### Test fixtures
+
+A short (~5 second) test card video+audio file at `tests/fixtures/test_card.mp4`
+(committed to the repo, small enough at ~1 MB) for Tier 2 virtual device tests.
+Content: colour bars + 1kHz tone, 1080p60, HEVC+AAC. Generated once via ffmpeg:
+```
+ffmpeg -f lavfi -i testsrc2=s=1920x1080:r=60:d=5 \
+       -f lavfi -i sine=f=1000:r=48000:d=5 \
+       -c:v libx265 -preset fast -crf 28 \
+       -c:a aac -b:a 128k \
+       tests/fixtures/test_card.mp4
+```
