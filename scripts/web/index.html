@@ -164,13 +164,13 @@
 
     mediaSource.addEventListener('sourceopen', function() {
       // Try codec strings from most to least specific.
-      // Our stream is HEVC Main 10, Level 4.0 (1080p60), AAC-LC.
-      // hev1 first — ffmpeg outputs hev1 (parameter sets in-band)
+      // All strings include mp4a.40.2 (AAC-LC) — omitting it silently drops audio.
+      // hev1 = parameter sets in-band (what ffmpeg outputs); hvc1 = out-of-band.
       var codecs = [
-        'video/mp4; codecs="hev1.2.4.L120.B0,mp4a.40.2"',  // Main 10, L4.0
+        'video/mp4; codecs="hev1.2.4.L120.B0,mp4a.40.2"',  // Main10, L4.0
         'video/mp4; codecs="hvc1.2.4.L120.B0,mp4a.40.2"',  // hvc1 variant
-        'video/mp4; codecs="hev1.2.4.L120.B0"',             // video only
-        'video/mp4; codecs="hev1"',                          // minimal
+        'video/mp4; codecs="hev1.1.6.L120.B0,mp4a.40.2"',  // Main profile
+        'video/mp4; codecs="hev1,mp4a.40.2"',               // generic
       ];
       var chosen = null;
       for (var i = 0; i < codecs.length; i++) {

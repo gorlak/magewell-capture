@@ -32,7 +32,9 @@ DEFAULT_OUTPUT_DIR = Path.home() / "Downloads"
 def probe_signal() -> tuple[int, int, float, bool]:
     """Return (width, height, fps, interlaced) from the live input, or fallback.
 
-    Prints what it detected so the operator can verify before a long capture.
+    Audio is always stereo on this hardware (Magewell USB, UAC 2ch limit).
+    Prints detected signal info so the operator can verify before capture.
+    Warns if compressed audio is detected (source changed away from LPCM).
     """
     try:
         sig = magewell.read_signal()
@@ -51,7 +53,11 @@ def probe_signal() -> tuple[int, int, float, bool]:
 
     try:
         audio = magewell.read_audio_signal()
-        print(f"  audio: {audio}")
+        if not audio.lpcm:
+            print(f"  audio: WARNING: compressed bitstream detected ({audio}); "
+                  f"expected LPCM (check source audio settings).", file=sys.stderr)
+        else:
+            print(f"  audio: {audio}")
     except magewell.MWError:
         print("  audio: (could not read)", file=sys.stderr)
 
@@ -85,7 +91,7 @@ def build_input_args(
     video_device: str = VIDEO_DEVICE,
     audio_device: str = AUDIO_DEVICE,
 ) -> list[str]:
-    """Build ffmpeg input arguments for V4L2 video + ALSA audio."""
+    """Build ffmpeg input arguments for V4L2 video + ALSA audio (LPCM stereo)."""
     fps_str = fps_to_ffmpeg(fps)
     cmd: list[str] = []
 
@@ -116,14 +122,9 @@ def build_input_args(
     return cmd
 
 
-def build_encode_args(fps: float) -> list[str]:
-    """Build ffmpeg encode arguments (HEVC NVENC + AAC)."""
-    gop = round(fps * 2)  # 2-second GOP
-
-    cmd: list[str] = []
-
-    # ---- video encode (single NVENC) ----
-    cmd += [
+def _video_encode_args(fps: float) -> list[str]:
+    gop = round(fps * 2)
+    return [
         "-c:v", "hevc_nvenc",
         "-preset", "p6",
         "-rc", "vbr",
@@ -137,16 +138,12 @@ def build_encode_args(fps: float) -> list[str]:
         "-g", str(gop),
     ]
 
-    # ---- audio encode ----
-    cmd += [
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-af", "aresample=async=1000",
-    ]
 
-    # ---- mapping ----
+def build_encode_args(fps: float) -> list[str]:
+    """Build ffmpeg encode arguments (HEVC NVENC + AAC) for stereo audio."""
+    cmd = _video_encode_args(fps)
+    cmd += ["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1000"]
     cmd += ["-map", "0:v", "-map", "1:a"]
-
     return cmd
 
 
@@ -173,7 +170,6 @@ def build_capture_cmd(
 
     cmd += build_encode_args(fps)
     cmd += ["-movflags", "+faststart", str(output)]
-
     return cmd
 
 
@@ -191,7 +187,7 @@ def build_monitor_cmd(
 
     Two separate encode+mux paths (the tee muxer doesn't forward codec
     extradata, producing an empty hvcC that MSE rejects):
-      1. MP4 file with faststart (recording)
+      1. MP4 file (session recording — no faststart, moov written at end)
       2. Fragmented MP4 to pipe for WebSocket+MSE preview
 
     Uses two NVENC sessions (T400 supports 3 concurrent).
@@ -200,12 +196,8 @@ def build_monitor_cmd(
     cmd += build_input_args(width, height, fps, video_device, audio_device)
 
     encode = build_encode_args(fps)
-
-    # ---- output 1: recording file ----
     cmd += encode
-    cmd += ["-movflags", "+faststart", str(output)]
-
-    # ---- output 2: fMP4 pipe for WebSocket preview ----
+    cmd += [str(output)]
     cmd += encode
     cmd += [
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof",

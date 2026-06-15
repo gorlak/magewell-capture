@@ -156,11 +156,15 @@ class TestBuildMonitorCmd:
         assert "default_base_moof" in cmd_str
         assert "pipe:1" in cmd_str
 
-    def test_file_has_faststart(self):
+    def test_file_has_no_faststart(self):
+        # The session file must NOT use faststart: moov is written at the end
+        # of the recording (duration unknown up front), and the pipe-drain
+        # shutdown fix relies on ffmpeg being able to write moov after SIGINT.
         cmd = self._build()
-        # faststart should appear before the file output
-        cmd_str = " ".join(cmd)
-        assert "+faststart" in cmd_str
+        file_idx = cmd.index("/tmp/session.mp4")
+        # Check only the flags that precede the file output (not the pipe flags)
+        flags_before_file = " ".join(cmd[:file_idx])
+        assert "+faststart" not in flags_before_file
 
     def test_custom_pipe_fd(self):
         cmd = self._build(pipe_fd="pipe:3")

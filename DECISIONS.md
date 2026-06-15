@@ -139,6 +139,103 @@ universally supported, and gives the encoder more internal precision even with
 only spatial AQ is used. Tested: 1080p59.94 encodes at ~20 Mbps CQ21 (~10 GB/hr),
 ~0.999x realtime on the T400.
 
+### Audio: USB hardware delivers stereo only
+
+The Magewell USB Capture HDMI Gen2 exposes audio to the host via USB Audio
+Class (UAC), which is hardcapped at **2 channels, S16_LE, 48 kHz**:
+
+```
+$ cat /proc/asound/HDMI/stream0
+  Interface 3 / Altset 1
+    Format: S16_LE  Channels: 2  Rates: 48000  Channel map: FL FR
+```
+
+The Magewell's **EDID advertises 8-channel LPCM** — this is what it tells
+the source it can *receive* over HDMI, and it is accurate: the HDMI receiver
+inside the device can accept multichannel audio. But the USB audio path to the
+host discards everything above 2 channels. The SDK's `AudioSignal.num_channels`
+reflects the HDMI signal metadata (e.g. 6 for 5.1), **not** what ALSA delivers.
+Do not use `num_channels` to set ffmpeg's `-ac`.
+
+**Current code** is therefore stereo-only: single AAC 192k track, no
+multichannel branch. The LPCM/compressed check in `probe_signal()` remains as
+a warning guard in case the source changes audio format.
+
+#### Restoring multichannel support (PCIe card path)
+
+A PCIe capture card (e.g. Magewell Pro Capture HDMI 4K Plus) exposes
+multichannel ALSA — the channel count the SDK reports matches what ALSA
+delivers. To re-enable:
+
+1. **`probe_signal()`** — return `audio_channels` from SDK:
+   ```python
+   audio_channels = max(2, audio.num_channels)  # valid for PCIe; NOT for USB
+   return sig.width, sig.height, sig.fps, sig.interlaced, audio_channels
+   ```
+
+2. **`build_input_args()`** — accept and pass `audio_channels`:
+   ```python
+   "-ac", str(audio_channels),   # instead of hardcoded "2"
+   ```
+
+3. **`_mc_filter_complex(n_stereo_copies)`** — splits `[1:a]` into
+   multichannel + N stereo downmix copies:
+   ```python
+   def _mc_filter_complex(n_stereo_copies):
+       n = n_stereo_copies + 1
+       splits = "".join(f"[a{i}]" for i in range(n))
+       chains = [f"[1:a]asplit={n}{splits}"]
+       chains.append("[a0]aresample=async=1000[mc]")
+       stereo_labels = []
+       for i in range(1, n):
+           sl = f"[s{i-1}]"
+           stereo_labels.append(sl)
+           chains.append(f"[a{i}]aresample=async=1000,aformat=channel_layouts=stereo{sl}")
+       return ";".join(chains), "[mc]", stereo_labels
+   ```
+
+4. **`_eac3_bitrate(audio_channels)`**:
+   ```python
+   def _eac3_bitrate(audio_channels):
+       return f"{max(640, audio_channels * 128)}k"
+   ```
+
+5. **Command builders** — branch on `audio_channels > 2`:
+   - `build_capture_cmd`: 1 stereo copy → EAC-3 multichannel + AAC stereo
+   - `build_monitor_cmd`: 2 stereo copies → EAC-3 + AAC stereo (file) + AAC
+     stereo (preview pipe)
+
+   ```python
+   if audio_channels > 2:
+       fc, mc, (s0,) = _mc_filter_complex(1)   # capture
+       fc, mc, (s0, s1) = _mc_filter_complex(2) # monitor
+       cmd += ["-filter_complex", fc]
+       cmd += ["-c:a:0", "eac3", "-b:a:0", _eac3_bitrate(audio_channels),
+               "-c:a:1", "aac", "-b:a:1", "192k"]
+       cmd += ["-map", "0:v", "-map", mc, "-map", s0]
+   else:
+       cmd += build_encode_args(fps)   # single AAC track
+   ```
+
+#### IEC 61937 / compressed bitstream path (spdif demuxer)
+
+If the source sends compressed audio (AC-3, EAC-3, TrueHD) rather than LPCM,
+ALSA presents the IEC 61937 bitstream as fake PCM bytes. ffmpeg's ALSA input
+treats them as linear PCM → garbled audio. To handle this:
+
+- Start `arecord` writing raw bytes to a named FIFO.
+- Read the FIFO with `-f spdif` in ffmpeg, which decodes the IEC 61937 framing.
+- The FIFO bridges ALSA-aware `arecord` and the byte-stream spdif demuxer.
+- Carrier params: AC-3 → 2ch 48 kHz; EAC-3 → 2ch 192 kHz; TrueHD HBR → 8ch
+  192 kHz. Set `arecord -c / -r` accordingly from SDK `AudioSignal.sample_rate`
+  and `num_channels`.
+
+**This path was removed** because the current source (Apple TV + Magewell EDID
+restricted to LPCM) reliably delivers LPCM. The spdif path has worse A/V sync
+than direct ALSA: the spdif demuxer counts bytes from t=0 rather than using
+hardware timestamps, and aligning it with V4L2 wall-clock video requires
+`aresample=async=1000` for drift correction only (not for initial offset).
+
 ### ALSA timestamps
 Do **not** use `-use_wallclock_as_timestamps` on the ALSA audio input. ALSA
 provides accurate timestamps from the hardware sample counter; overriding with

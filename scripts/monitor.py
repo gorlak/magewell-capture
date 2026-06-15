@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -396,13 +397,24 @@ async def async_main(output_dir: Path, port: int) -> int:
 
     ws_server = await serve(ws_handler, "0.0.0.0", ws_port)
 
-    print(f"[monitor] HTTP server on http://0.0.0.0:{port}")
+    _host = socket.gethostname()
+    if '.' not in _host:
+        try:
+            with open('/etc/resolv.conf') as _f:
+                for _line in _f:
+                    _parts = _line.split()
+                    if len(_parts) >= 2 and _parts[0] in ('domain', 'search'):
+                        _host = f"{_host}.{_parts[1]}"
+                        break
+        except OSError:
+            pass
+    print(f"[monitor] HTTP server on http://{_host}:{port}")
     print(f"[monitor] WebSocket on ws://0.0.0.0:{ws_port}")
     print("[monitor] press Ctrl-C to stop capture\n")
 
     # ---- shutdown handling ----
     shutdown_event = asyncio.Event()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     received_signal = None
 
     def _on_signal(signum: int) -> None:
@@ -425,6 +437,16 @@ async def async_main(output_dir: Path, port: int) -> int:
                 break
             if not shutdown_event.is_set():
                 await broadcaster.feed(chunk)
+
+    async def _drain_stdout() -> None:
+        """Drain ffmpeg stdout without broadcasting — used during shutdown so
+        ffmpeg's pipe write never blocks and it can finalize the session file."""
+        if proc.stdout is None:
+            return
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                break
 
     # ---- ffmpeg stderr logger ----
     async def _log_stderr() -> None:
@@ -451,24 +473,42 @@ async def async_main(output_dir: Path, port: int) -> int:
     if shutdown_event.is_set() and proc.returncode is None:
         if received_signal != signal.SIGINT:
             proc.send_signal(signal.SIGINT)
+
+        # Cancel the broadcaster pipe task and replace with a fast drain so
+        # ffmpeg's stdout write never blocks. ffmpeg serialises all output I/O
+        # in one thread: a blocked pipe:1 write prevents moov finalisation too.
+        pipe_task.cancel()
+        await asyncio.gather(pipe_task, return_exceptions=True)
+        drain_task = asyncio.create_task(_drain_stdout())
+
+        print("[monitor] waiting for ffmpeg to finalize session file...",
+              file=sys.stderr)
         try:
-            await asyncio.wait_for(proc.wait(), timeout=15.0)
+            await asyncio.wait_for(proc.wait(), timeout=120.0)
         except asyncio.TimeoutError:
             print("[monitor] ffmpeg not responding, killing...",
                   file=sys.stderr)
-            if proc.stdout:
-                proc.stdout.feed_eof()
             proc.kill()
             await proc.wait()
+        finally:
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
 
     session.finalize(session.elapsed)
 
     http_srv.close()
-    await http_srv.wait_closed()
     ws_server.close()
-    await ws_server.wait_closed()
     pipe_task.cancel()
     stderr_task.cancel()
+    await asyncio.gather(pipe_task, stderr_task, return_exceptions=True)
+    try:
+        async with asyncio.timeout(3.0):
+            await asyncio.gather(
+                http_srv.wait_closed(),
+                ws_server.wait_closed(),
+            )
+    except TimeoutError:
+        pass
 
     rc = proc.returncode or 0
     if rc == 255:
