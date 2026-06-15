@@ -116,6 +116,17 @@
     font-size: 18px;
     text-align: center;
   }
+  #warnings-banner {
+    display: none;
+    width: 100%;
+    max-width: 1280px;
+    background: rgba(185, 28, 28, 0.95);
+    color: #fff;
+    font-size: 13px;
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+    padding: 6px 16px;
+    border-top: 1px solid rgba(255, 100, 100, 0.4);
+  }
 </style>
 </head>
 <body>
@@ -129,6 +140,8 @@
   </div>
   <div id="error-msg">Connecting to stream...</div>
 </div>
+
+<div id="warnings-banner"></div>
 
 <div id="controls">
   <button id="mute-btn" style="padding:12px 20px;font-size:14px;border:none;border-radius:6px;cursor:pointer;background:#444;color:#fff">Unmute</button>
@@ -145,6 +158,7 @@
   const recordBtn = document.getElementById('record-btn');
   const segCountEl = document.getElementById('segment-count');
   const errorMsg = document.getElementById('error-msg');
+  const warningsBanner = document.getElementById('warnings-banner');
 
   let currentState = 'STANDBY';
   let mediaSource = null;
@@ -331,6 +345,14 @@
     }
     if (data.segments && data.segments.length > 0) {
       segCountEl.textContent = data.segments.length + ' segment(s) marked';
+    }
+    if (data.warnings && data.warnings.length > 0) {
+      var w = data.warnings;
+      var prefix = w.length > 1 ? '[' + w.length + ' warnings] ' : '';
+      warningsBanner.textContent = 'WARNING: ' + prefix + w[w.length - 1];
+      warningsBanner.style.display = 'block';
+    } else {
+      warningsBanner.style.display = 'none';
     }
   }
 

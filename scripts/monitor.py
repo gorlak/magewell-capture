@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import signal
 import socket
 import subprocess
@@ -46,6 +47,19 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 # ---------------------------------------------------------------------------
+# ffmpeg stderr warning patterns
+# ---------------------------------------------------------------------------
+
+_WARN_PATTERNS = [
+    re.compile(r"Error while writing output"),
+    re.compile(r"Error initializing output stream"),
+    re.compile(r"No space left on device"),
+    re.compile(r"Conversion failed"),
+    re.compile(r"NVENC.+[Ee]rror|[Ee]rror.+NVENC"),
+]
+
+
+# ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
 
@@ -63,6 +77,7 @@ class SessionState:
         self.segments: list[tuple[float, float]] = []
         self._current_in: float | None = None
         self._current_in_wall: float | None = None
+        self.warnings: list[str] = []
 
     @property
     def elapsed(self) -> float:
@@ -91,6 +106,11 @@ class SessionState:
         self.state = State.STANDBY
         return True
 
+    def add_warning(self, msg: str) -> None:
+        if msg not in self.warnings:
+            self.warnings.append(msg)
+        print(f"[monitor] WARNING: {msg}", file=sys.stderr)
+
     def finalize(self, stream_time: float) -> None:
         if self.state is State.RECORDING and self._current_in is not None:
             self.segments.append((self._current_in, stream_time))
@@ -111,6 +131,7 @@ class SessionState:
                 {"in": round(s, 3), "out": round(e, 3)}
                 for s, e in self.segments
             ],
+            "warnings": list(self.warnings),
         }
 
 
@@ -458,9 +479,51 @@ async def async_main(output_dir: Path, port: int) -> int:
             text = line.decode("utf-8", errors="replace").rstrip()
             if text:
                 print(f"[ffmpeg] {text}")
+                for pat in _WARN_PATTERNS:
+                    if pat.search(text):
+                        session.add_warning(text)
+                        break
+
+    # ---- session file stall detector ----
+    async def _stall_detector() -> None:
+        try:
+            await asyncio.sleep(5.0)
+
+            try:
+                prev_size = session_file.stat().st_size
+            except OSError:
+                prev_size = 0
+
+            if prev_size == 0:
+                session.add_warning(
+                    "session file not growing after 5s settling — "
+                    "possible encoder or disk error"
+                )
+
+            stall_warned = False
+            while True:
+                await asyncio.sleep(10.0)
+                try:
+                    current_size = session_file.stat().st_size
+                except OSError:
+                    current_size = 0
+
+                if current_size > prev_size:
+                    prev_size = current_size
+                    stall_warned = False
+                elif not stall_warned:
+                    stall_warned = True
+                    session.add_warning(
+                        f"session file stalled at "
+                        f"{current_size // (1024 * 1024)} MB — "
+                        "possible encoder or mux error"
+                    )
+        except asyncio.CancelledError:
+            pass
 
     pipe_task = asyncio.create_task(_read_pipe())
     stderr_task = asyncio.create_task(_log_stderr())
+    stall_task = asyncio.create_task(_stall_detector())
     ffmpeg_task = asyncio.create_task(proc.wait())
     shutdown_task = asyncio.create_task(shutdown_event.wait())
 
@@ -500,7 +563,8 @@ async def async_main(output_dir: Path, port: int) -> int:
     ws_server.close()
     pipe_task.cancel()
     stderr_task.cancel()
-    await asyncio.gather(pipe_task, stderr_task, return_exceptions=True)
+    stall_task.cancel()
+    await asyncio.gather(pipe_task, stderr_task, stall_task, return_exceptions=True)
     try:
         async with asyncio.timeout(3.0):
             await asyncio.gather(

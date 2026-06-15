@@ -112,6 +112,7 @@ def _connect_stubborn_ws(host: str, port: int, timeout: float = 10.0) -> socket.
 # Tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.device
 def test_shutdown_exits_within_7s_with_ws_client_connected(tmp_path):
     """After SIGTERM, monitor.py must exit within 7 s even when a stubborn
     WebSocket client (one that never sends a Close frame — like a browser tab)
@@ -162,6 +163,7 @@ def test_shutdown_exits_within_7s_with_ws_client_connected(tmp_path):
             proc.wait()
 
 
+@pytest.mark.device
 def test_session_file_has_valid_moov_after_shutdown(tmp_path):
     """After SIGTERM + clean exit the session file must have a valid moov atom
     with both video and audio streams, and duration ≥ 8 s.
