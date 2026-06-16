@@ -35,6 +35,13 @@
     font-size: 18px; padding: 14px 48px;
   }
   #btn-start:hover { background: #3b82f6; }
+  #disk-bar-wrap { width: 100%; max-width: 760px; }
+  #disk-label { font-size: 12px; color: #555; margin-bottom: 5px; }
+  #disk-track {
+    height: 4px; background: #222; border-radius: 2px; overflow: hidden;
+  }
+  #disk-fill { height: 100%; background: #2563eb; border-radius: 2px; transition: width 0.4s; }
+  #disk-fill.warn { background: #dc2626; }
   #file-list { width: 100%; max-width: 760px; }
   .file-section { margin-bottom: 24px; }
   .section-header {
@@ -153,6 +160,10 @@
 <div id="page-index" class="page active">
   <h1>Capture Monitor</h1>
   <button id="btn-start">Start Capture</button>
+  <div id="disk-bar-wrap">
+    <div id="disk-label"></div>
+    <div id="disk-track"><div id="disk-fill"></div></div>
+  </div>
   <div id="file-list">
     <div class="file-section" id="sessions-section">
       <div class="section-header">
@@ -211,10 +222,12 @@
   };
 
   // INDEX
-  var btnStart              = document.getElementById('btn-start');
-  var sessionsList          = document.getElementById('sessions-list');
-  var recordingsList        = document.getElementById('recordings-list');
-  var btnDeleteAllSessions  = document.getElementById('btn-delete-all-sessions');
+  var btnStart               = document.getElementById('btn-start');
+  var diskLabel              = document.getElementById('disk-label');
+  var diskFill               = document.getElementById('disk-fill');
+  var sessionsList           = document.getElementById('sessions-list');
+  var recordingsList         = document.getElementById('recordings-list');
+  var btnDeleteAllSessions   = document.getElementById('btn-delete-all-sessions');
   var btnDeleteAllRecordings = document.getElementById('btn-delete-all-recordings');
 
   // CAPTURING
@@ -291,14 +304,29 @@
   pollTimer = setInterval(pollStatus, 2000);
 
   // ---- INDEX ----
-  function fmtSize(bytes) {
-    if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
-    return (bytes / 1e6).toFixed(0) + ' MB';
+  function fmtBytes(b) {
+    if (b >= 1e12) return (b / 1e12).toFixed(1) + ' TB';
+    if (b >= 1e9)  return (b / 1e9).toFixed(1) + ' GB';
+    return (b / 1e6).toFixed(0) + ' MB';
   }
 
   function updateIndex(data) {
     lastSessions   = data.sessions   || [];
     lastRecordings = data.recordings || [];
+
+    var disk = data.disk || {};
+    if (disk.total && disk.total > 0) {
+      var BYTES_PER_HOUR = 10e9; // HEVC @20 Mbps ≈ 10 GB/hr
+      var hours = disk.free / BYTES_PER_HOUR;
+      var hoursStr = hours >= 10 ? hours.toFixed(0) : hours.toFixed(1);
+      var usedPct = Math.round((1 - disk.free / disk.total) * 100);
+      diskLabel.textContent = '~' + hoursStr + ' h remaining  ·  ' + fmtBytes(disk.free) + ' free of ' + fmtBytes(disk.total) + '  (HEVC @20 Mbps)';
+      diskFill.style.width = usedPct + '%';
+      diskFill.className = hours < 4 ? 'warn' : '';
+    } else {
+      diskLabel.textContent = '';
+      diskFill.style.width = '0%';
+    }
 
     if (lastSessions.length === 0) {
       sessionsList.innerHTML = '<div class="no-files">No session files.</div>';
@@ -307,7 +335,7 @@
       sessionsList.innerHTML = lastSessions.map(function(s) {
         return '<div class="file-row">'
           + '<span class="file-name"><a href="/view?file=' + encodeURIComponent(s.name) + '">' + escHtml(s.name) + '</a></span>'
-          + '<span class="file-size">' + fmtSize(s.size) + '</span>'
+          + '<span class="file-size">' + fmtBytes(s.size) + '</span>'
           + '<button class="btn-del" data-type="session" data-name="' + escAttr(s.name) + '">Delete</button>'
           + '</div>';
       }).join('');
@@ -321,7 +349,7 @@
       recordingsList.innerHTML = lastRecordings.map(function(r) {
         return '<div class="file-row">'
           + '<span class="file-name"><a href="/view?file=' + encodeURIComponent(r.name) + '">' + escHtml(r.name) + '</a></span>'
-          + '<span class="file-size">' + fmtSize(r.size) + '</span>'
+          + '<span class="file-size">' + fmtBytes(r.size) + '</span>'
           + '<button class="btn-del" data-type="recording" data-name="' + escAttr(r.name) + '">Delete</button>'
           + '</div>';
       }).join('');
@@ -350,7 +378,7 @@
     var count = lastSessions.length;
     var totalBytes = lastSessions.reduce(function(a, s) { return a + s.size; }, 0);
     if (!confirm('Delete all ' + count + ' session file(s)?\nThis cannot be undone.')) return;
-    if (!confirm('This will free ' + fmtSize(totalBytes) + ' of disk space. Continue?')) return;
+    if (!confirm('This will free ' + fmtBytes(totalBytes) + ' of disk space. Continue?')) return;
     await apiDelete('/api/sessions');
     pollStatus();
   });
@@ -361,7 +389,7 @@
     var count = lastRecordings.length;
     var totalBytes = lastRecordings.reduce(function(a, r) { return a + r.size; }, 0);
     if (!confirm('Delete all ' + count + ' recording(s)?\nThis cannot be undone.')) return;
-    if (!confirm('This will free ' + fmtSize(totalBytes) + ' of disk space. Continue?')) return;
+    if (!confirm('This will free ' + fmtBytes(totalBytes) + ' of disk space. Continue?')) return;
     await apiDelete('/api/recordings');
     pollStatus();
   });

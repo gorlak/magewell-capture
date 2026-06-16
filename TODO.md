@@ -24,19 +24,17 @@ Output directory goes in a config file (format TBD — likely
 `~/.config/magewell-capture/config.toml`). CLI `--output-dir` flag already
 exists and takes precedence.
 
-### INDEX page: disk status
-**Disk usage bar** — free / total for the output filesystem. Refreshed on load.
-The DELETE endpoints are already implemented (`/api/session/<name>`,
-`/api/sessions`, `/api/recording/<name>`, `/api/recordings`); the INDEX page
-doesn't surface them yet.
+### INDEX page: disk status ✅
+Disk bar (free / total / %) shown on INDEX. Turns red below 10% free.
+DELETE endpoints and UI already wired.
 
 ### Disk warning before capture
-On **Start Capture**, if free space < 50% of total capacity, show a
-non-blocking warning before proceeding.
+On **Start Capture**, if free space is critically low (< 10%), show a
+non-blocking confirmation before proceeding.
 
-### Disk warning during CAPTURING
-Banner added to `/api/status` if free space drops below 50%. Can piggyback on
-the existing stall-detector background task (already polls every 10 s).
+### Disk warning during CAPTURING ✅
+Low-disk warning (< 10% free) added to the stall-detector background task;
+surfaces as a warnings banner in the CAPTURING UI.
 
 ### Network share transfer after extraction
 After each clip extracts, optionally move to a configured destination

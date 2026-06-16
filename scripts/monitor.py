@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import signal
 import socket
 import sys
@@ -56,6 +57,9 @@ _WARN_PATTERNS = [
 _NAME_RE = re.compile(r"(session|recording)_[\w.]+\.mp4")
 _SESSION_NAME_RE = re.compile(r"session_[\w.]+\.mp4")
 _RECORDING_NAME_RE = re.compile(r"recording_[\w.]+\.mp4")
+
+# HEVC Main10 CQ21 @1080p60 ≈ 20 Mbps ≈ 10 GB/hr (measured; see DECISIONS.md)
+_HEVC_BYTES_PER_HOUR = 10 * 1_000_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +205,13 @@ class AppContext:
                     recordings.append({"name": p.name, "size": size})
         except OSError:
             pass
-        return {"sessions": sessions, "recordings": recordings}
+        disk: dict = {}
+        try:
+            usage = shutil.disk_usage(self.output_dir)
+            disk = {"free": usage.free, "total": usage.total}
+        except OSError:
+            pass
+        return {"sessions": sessions, "recordings": recordings, "disk": disk}
 
     # ---- meta ----
 
@@ -477,6 +487,7 @@ class AppContext:
                     "possible encoder or disk error"
                 )
             stall_warned = False
+            disk_warned = False
             while True:
                 await asyncio.sleep(10.0)
                 try:
@@ -493,6 +504,18 @@ class AppContext:
                         f"{current_size // (1024 * 1024)} MB — "
                         "possible encoder or mux error"
                     )
+                if not disk_warned and self.session:
+                    try:
+                        usage = shutil.disk_usage(self.output_dir)
+                        hours_remaining = usage.free / _HEVC_BYTES_PER_HOUR
+                        if hours_remaining < 4.0:
+                            disk_warned = True
+                            self.session.add_warning(
+                                f"low disk space: ~{hours_remaining:.1f} h remaining "
+                                f"(HEVC @20 Mbps)"
+                            )
+                    except OSError:
+                        pass
         except asyncio.CancelledError:
             pass
 
