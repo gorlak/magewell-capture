@@ -355,6 +355,67 @@ testing and diagnostics (e.g. `capture.py --duration 5`).
 Both share `capture_shared.py` (ffmpeg command builders, signal probe, path
 generation).
 
+### Extraction seeking: output-mode only
+
+`build_extract_cmd` places `-ss` and `-to` **after** `-i` (output-mode
+seeking), not before it (input-mode seeking). This is not the default ffmpeg
+recommendation for stream-copy (input-mode is faster), but it is necessary here:
+
+- Input-mode seeking jumps to the nearest video keyframe, which can be up to
+  one GOP (2 s) before the requested start time.
+- Audio seeking in input mode is independent and lands at the exact timestamp.
+- Result: video starts at the keyframe; audio starts 0–2 s later. The first
+  recording has 0–2 s of silence at the head.
+
+Output-mode seeking is slower (ffmpeg must decode and discard frames up to the
+start point) but both streams are cut at exactly the same position. Since these
+are stream-copy extractions from a file (not live), the speed difference is
+negligible. The 0.15 s end pad (`end + 0.15`) avoids dropping the last audio
+packet when the cut falls on a packet boundary.
+
+### Shutdown: HTTP CLOSE-WAIT hang
+
+When a browser stops reading an MP4 mid-stream (tab closed, navigation, etc.),
+the TCP connection enters CLOSE-WAIT with the kernel send buffer full. In this
+state, `asyncio.StreamWriter.close()` schedules `connection_lost()` only once
+the write buffer drains — which never happens. `writer.wait_closed()` blocks
+indefinitely.
+
+Fix: call `writer.transport.abort()` between `close()` and `wait_closed()`.
+`abort()` calls `_force_close()` → `_call_connection_lost()` immediately,
+regardless of buffer state (sends a TCP RST). `wait_closed()` then returns in
+the next event loop iteration.
+
+The full shutdown sequence requires all four pieces to work together:
+1. `asyncio.timeout(3.0)` around `ws_server.wait_closed()` — handles stubborn
+   WebSocket clients that never send a Close frame.
+2. `close_timeout=1` on the websockets server — limits per-client WS close
+   handshake time.
+3. Task cancellation sweep in `async_main` — cancels any still-running
+   `_handle()` coroutines after the server stops accepting.
+4. `transport.abort()` in `_handle()`'s finally block — drains the stuck HTTP
+   send buffer so `wait_closed()` returns.
+
+Items 3 and 4 are coupled: the sweep (3) cancels the stuck `_handle()` task,
+propagating `CancelledError` to its finally block where `abort()` (4) fires.
+
+### Session lifecycle: no separate REPORT state
+
+The original design had a four-state cycle: INDEX → CAPTURING → FINALIZING →
+REPORT → INDEX, where REPORT was a dedicated page showing extraction results.
+
+This was simplified: FINALIZING transitions directly to INDEX. The universal
+`/view?file=<name>` viewer serves both sessions and recordings, loading the
+associated `.json` metadata asynchronously if present and displaying it as a
+flat key/value table. Reasoning:
+- A dedicated REPORT page is ephemeral (lost on restart) and duplicates what
+  INDEX already shows from the meta file.
+- The `/view` page works at any time — during FINALIZING, after restart, for
+  old recordings — with no state dependencies.
+- "File first" model: the video file is the primary entity; metadata enriches
+  it but is never required. `/view` always shows the player; the metadata table
+  appears only if the `.json` exists.
+
 ## Known issues / watch-for
 
 - **SDK device access needs a udev rule (USB node + hidraw).** The SDK opens the

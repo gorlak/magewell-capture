@@ -186,12 +186,23 @@ class TestBuildExtractCmd:
             Path("/tmp/session.mp4"), 10.5, 25.0, Path("/tmp/out.mp4")
         )
         assert cmd[0] == "ffmpeg"
-        assert "-ss" in cmd
         idx_ss = cmd.index("-ss")
         assert cmd[idx_ss + 1] == "10.500"
         idx_to = cmd.index("-to")
-        # end time includes 0.15s pad to avoid truncating trailing audio
         assert cmd[idx_to + 1] == "25.150"
+
+    def test_seek_is_output_mode(self):
+        # -ss and -to must come AFTER -i so both streams are cut from the same
+        # position; input-mode seeking anchors video at the keyframe but audio
+        # at the exact timestamp, producing silence up to one GOP long.
+        cmd = build_extract_cmd(
+            Path("/tmp/session.mp4"), 10.5, 25.0, Path("/tmp/out.mp4")
+        )
+        idx_i  = cmd.index("-i")
+        idx_ss = cmd.index("-ss")
+        idx_to = cmd.index("-to")
+        assert idx_ss > idx_i, "-ss must be after -i (output-mode seek)"
+        assert idx_to > idx_i, "-to must be after -i (output-mode seek)"
 
     def test_uses_stream_copy(self):
         cmd = build_extract_cmd(

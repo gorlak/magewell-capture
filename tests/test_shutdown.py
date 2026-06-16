@@ -51,6 +51,19 @@ def _wait_for_http(port: int, timeout: float = 20.0) -> bool:
     return False
 
 
+def _http_post(port: int, path: str) -> int:
+    req = urllib.request.Request(
+        f"http://localhost:{port}{path}",
+        data=b"",
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
 def _connect_stubborn_ws(host: str, port: int, timeout: float = 10.0) -> socket.socket:
     """Open a WebSocket connection via a raw socket that never sends a Close frame.
 
@@ -134,6 +147,8 @@ def test_shutdown_exits_within_7s_with_ws_client_connected(tmp_path):
             "monitor.py HTTP server did not become ready within 20 s"
         )
 
+        status = _http_post(_HTTP_PORT_1, "/api/start")
+        assert status == 200, f"POST /api/start returned {status}"
         ws_sock = _connect_stubborn_ws("127.0.0.1", _HTTP_PORT_1 + 1, timeout=10.0)
         time.sleep(2.0)  # give ffmpeg time to start and push initial fMP4 frames
 
@@ -185,6 +200,8 @@ def test_session_file_has_valid_moov_after_shutdown(tmp_path):
             "monitor.py HTTP server did not become ready within 20 s"
         )
 
+        status = _http_post(_HTTP_PORT_2, "/api/start")
+        assert status == 200, f"POST /api/start returned {status}"
         time.sleep(10.0)  # record 10 s of content
 
         proc.send_signal(signal.SIGTERM)

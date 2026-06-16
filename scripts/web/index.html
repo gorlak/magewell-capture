@@ -10,329 +10,381 @@
     background: #111;
     color: #eee;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-    display: flex;
-    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* ---- shared ---- */
+  .page { display: none; }
+  .page.active { display: flex; flex-direction: column; }
+  button {
+    border: none; border-radius: 6px; cursor: pointer;
+    font-size: 15px; font-weight: 700; padding: 10px 28px;
+    text-transform: uppercase; letter-spacing: 1px; transition: background 0.15s;
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  /* ---- INDEX ---- */
+  #page-index {
     align-items: center;
+    padding: 40px 24px;
+    gap: 32px;
+  }
+  #page-index h1 { font-size: 22px; color: #aaa; font-weight: 400; }
+  #btn-start {
+    background: #2563eb; color: #fff;
+    font-size: 18px; padding: 14px 48px;
+  }
+  #btn-start:hover { background: #3b82f6; }
+  #file-list { width: 100%; max-width: 760px; }
+  .file-section { margin-bottom: 24px; }
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .section-header h2 {
+    font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #666;
+  }
+  .btn-delete-all {
+    background: transparent; border: 1px solid #3a3a3a; color: #555;
+    font-size: 11px; font-weight: 600; padding: 3px 10px;
+    text-transform: uppercase; letter-spacing: 0.5px; border-radius: 3px;
+  }
+  .btn-delete-all:hover:not(:disabled) { border-color: #dc2626; color: #dc2626; }
+  .file-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 0; border-bottom: 1px solid #1e1e1e;
+    font-size: 13px; color: #ccc;
+  }
+  .file-name { flex: 1; font-family: monospace; overflow: hidden; text-overflow: ellipsis; }
+  .file-name a { color: #60a5fa; text-decoration: none; }
+  .file-name a:hover { text-decoration: underline; }
+  .file-size { color: #555; white-space: nowrap; }
+  .btn-del {
+    background: transparent; border: 1px solid #2e2e2e; color: #555;
+    font-size: 11px; font-weight: 600; padding: 3px 10px;
+    text-transform: uppercase; letter-spacing: 0.5px; border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .btn-del:hover { border-color: #dc2626; color: #dc2626; }
+  .no-files { color: #444; font-size: 13px; padding: 8px 0; }
+
+  /* ---- CAPTURING ---- */
+  #page-capturing {
     height: 100vh;
     overflow: hidden;
   }
   #video-container {
     position: relative;
     width: 100%;
-    max-width: 1280px;
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-  }
-  video {
-    width: 100%;
-    max-height: calc(100vh - 80px);
     background: #000;
+    min-height: 0;
   }
+  video { width: 100%; max-height: calc(100vh - 120px); background: #000; }
   #status-badge {
-    position: absolute;
-    top: 16px;
-    right: 16px;
-    padding: 6px 16px;
-    border-radius: 4px;
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    text-transform: uppercase;
+    position: absolute; top: 16px; right: 16px;
+    padding: 6px 16px; border-radius: 4px;
+    font-size: 14px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
   }
-  #status-badge.standby {
-    background: rgba(80, 80, 80, 0.85);
-    color: #ccc;
-  }
+  #status-badge.standby { background: rgba(80,80,80,.85); color: #ccc; }
   #status-badge.recording {
-    background: rgba(220, 38, 38, 0.9);
-    color: #fff;
+    background: rgba(220,38,38,.9); color: #fff;
     animation: pulse 1.5s ease-in-out infinite;
   }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
-  }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.6; } }
   #timecode {
-    position: absolute;
-    bottom: 16px;
-    left: 16px;
-    font-size: 16px;
-    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
-    background: rgba(0, 0, 0, 0.7);
-    padding: 4px 10px;
-    border-radius: 4px;
+    position: absolute; bottom: 16px; left: 16px;
+    font-size: 16px; font-family: monospace;
+    background: rgba(0,0,0,.7); padding: 4px 10px; border-radius: 4px;
   }
-  #timecode .rec-time {
-    color: #f87171;
-    margin-left: 12px;
-  }
-  #controls {
-    width: 100%;
-    max-width: 1280px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    padding: 16px;
-    height: 80px;
-  }
-  #record-btn {
-    padding: 12px 36px;
-    font-size: 16px;
-    font-weight: 700;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: background 0.15s;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-  }
-  #record-btn.standby {
-    background: #dc2626;
-    color: #fff;
-  }
-  #record-btn.standby:hover {
-    background: #ef4444;
-  }
-  #record-btn.recording {
-    background: #555;
-    color: #fff;
-  }
-  #record-btn.recording:hover {
-    background: #666;
-  }
-  #segment-count {
-    font-size: 13px;
-    color: #888;
-  }
-  #error-msg {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    color: #888;
-    font-size: 18px;
-    text-align: center;
+  #rec-elapsed { color: #f87171; margin-left: 12px; }
+  #ws-error {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    color: #888; font-size: 18px; text-align: center;
   }
   #warnings-banner {
     display: none;
     width: 100%;
-    max-width: 1280px;
-    background: rgba(185, 28, 28, 0.95);
+    background: rgba(185,28,28,.95);
     color: #fff;
     font-size: 13px;
-    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+    font-family: monospace;
     padding: 6px 16px;
-    border-top: 1px solid rgba(255, 100, 100, 0.4);
   }
+  #controls {
+    width: 100%; display: flex; align-items: center; justify-content: center;
+    gap: 12px; padding: 12px 16px; height: 68px; flex-shrink: 0;
+    background: #111;
+  }
+  #mute-btn { background: #444; color: #fff; font-size: 13px; padding: 8px 16px; font-weight: 600; }
+  #record-btn.standby { background: #dc2626; color: #fff; }
+  #record-btn.standby:hover { background: #ef4444; }
+  #record-btn.recording { background: #555; color: #fff; }
+  #record-btn.recording:hover { background: #666; }
+  #complete-btn { background: #16a34a; color: #fff; }
+  #complete-btn:hover:not(:disabled) { background: #22c55e; }
+  #abort-btn { background: #374151; color: #aaa; font-size: 13px; padding: 8px 16px; }
+  #abort-btn:hover { background: #4b5563; }
+  #segment-count { font-size: 13px; color: #888; min-width: 80px; }
+
+  /* ---- FINALIZING ---- */
+  #page-finalizing {
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    gap: 24px;
+  }
+  #finalizing-msg { font-size: 20px; color: #ccc; }
+  #finalizing-detail { font-size: 14px; color: #666; }
+  .spinner {
+    width: 40px; height: 40px; border: 3px solid #333;
+    border-top-color: #60a5fa; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<div id="video-container">
-  <video id="player" muted autoplay playsinline></video>
-  <div id="status-badge" class="standby">STANDBY</div>
-  <div id="timecode">
-    <span id="elapsed">00:00:00</span>
-    <span id="rec-elapsed" class="rec-time"></span>
+<!-- INDEX -->
+<div id="page-index" class="page active">
+  <h1>Capture Monitor</h1>
+  <button id="btn-start">Start Capture</button>
+  <div id="file-list">
+    <div class="file-section" id="sessions-section">
+      <div class="section-header">
+        <h2>Sessions</h2>
+        <button id="btn-delete-all-sessions" class="btn-delete-all" disabled>Delete All</button>
+      </div>
+      <div id="sessions-list"><div class="no-files">No session files.</div></div>
+    </div>
+    <div class="file-section" id="recordings-section">
+      <div class="section-header">
+        <h2>Recordings</h2>
+        <button id="btn-delete-all-recordings" class="btn-delete-all" disabled>Delete All</button>
+      </div>
+      <div id="recordings-list"><div class="no-files">No recordings.</div></div>
+    </div>
   </div>
-  <div id="error-msg">Connecting to stream...</div>
 </div>
 
-<div id="warnings-banner"></div>
+<!-- CAPTURING -->
+<div id="page-capturing" class="page">
+  <div id="video-container">
+    <video id="player" muted autoplay playsinline></video>
+    <div id="status-badge" class="standby">STANDBY</div>
+    <div id="timecode">
+      <span id="elapsed">00:00:00</span>
+      <span id="rec-elapsed"></span>
+    </div>
+    <div id="ws-error">Connecting to stream...</div>
+  </div>
+  <div id="warnings-banner"></div>
+  <div id="controls">
+    <button id="mute-btn">Unmute</button>
+    <button id="record-btn" class="standby">Record</button>
+    <span id="segment-count"></span>
+    <button id="complete-btn" disabled>Complete</button>
+    <button id="abort-btn">Abort</button>
+  </div>
+</div>
 
-<div id="controls">
-  <button id="mute-btn" style="padding:12px 20px;font-size:14px;border:none;border-radius:6px;cursor:pointer;background:#444;color:#fff">Unmute</button>
-  <button id="record-btn" class="standby">Record</button>
-  <span id="segment-count"></span>
+<!-- FINALIZING -->
+<div id="page-finalizing" class="page">
+  <div class="spinner"></div>
+  <div id="finalizing-msg">Finalizing capture…</div>
+  <div id="finalizing-detail"></div>
 </div>
 
 <script>
 (function() {
-  const video = document.getElementById('player');
-  const badge = document.getElementById('status-badge');
-  const elapsedEl = document.getElementById('elapsed');
-  const recElapsedEl = document.getElementById('rec-elapsed');
-  const recordBtn = document.getElementById('record-btn');
-  const segCountEl = document.getElementById('segment-count');
-  const errorMsg = document.getElementById('error-msg');
-  const warningsBanner = document.getElementById('warnings-banner');
+  'use strict';
 
-  let currentState = 'STANDBY';
-  let mediaSource = null;
-  let sourceBuffer = null;
-  let queue = [];
-  let appending = false;
+  // ---- element refs ----
+  var pages = {
+    INDEX:      document.getElementById('page-index'),
+    CAPTURING:  document.getElementById('page-capturing'),
+    FINALIZING: document.getElementById('page-finalizing'),
+  };
 
-  // ---- WebSocket + MSE setup ----
-  function initPlayer() {
-    if (!('MediaSource' in window)) {
-      errorMsg.textContent = 'MediaSource API not supported in this browser';
-      return;
-    }
+  // INDEX
+  var btnStart              = document.getElementById('btn-start');
+  var sessionsList          = document.getElementById('sessions-list');
+  var recordingsList        = document.getElementById('recordings-list');
+  var btnDeleteAllSessions  = document.getElementById('btn-delete-all-sessions');
+  var btnDeleteAllRecordings = document.getElementById('btn-delete-all-recordings');
 
-    mediaSource = new MediaSource();
-    video.src = URL.createObjectURL(mediaSource);
+  // CAPTURING
+  var video        = document.getElementById('player');
+  var badge        = document.getElementById('status-badge');
+  var elapsedEl    = document.getElementById('elapsed');
+  var recElapsedEl = document.getElementById('rec-elapsed');
+  var wsError      = document.getElementById('ws-error');
+  var warnBanner   = document.getElementById('warnings-banner');
+  var muteBtn      = document.getElementById('mute-btn');
+  var recordBtn    = document.getElementById('record-btn');
+  var segCountEl   = document.getElementById('segment-count');
+  var completeBtn  = document.getElementById('complete-btn');
+  var abortBtn     = document.getElementById('abort-btn');
 
-    mediaSource.addEventListener('sourceopen', function() {
-      // Try codec strings from most to least specific.
-      // All strings include mp4a.40.2 (AAC-LC) — omitting it silently drops audio.
-      // hev1 = parameter sets in-band (what ffmpeg outputs); hvc1 = out-of-band.
-      var codecs = [
-        'video/mp4; codecs="hev1.2.4.L120.B0,mp4a.40.2"',  // Main10, L4.0
-        'video/mp4; codecs="hvc1.2.4.L120.B0,mp4a.40.2"',  // hvc1 variant
-        'video/mp4; codecs="hev1.1.6.L120.B0,mp4a.40.2"',  // Main profile
-        'video/mp4; codecs="hev1,mp4a.40.2"',               // generic
-      ];
-      var chosen = null;
-      for (var i = 0; i < codecs.length; i++) {
-        if (MediaSource.isTypeSupported(codecs[i])) {
-          chosen = codecs[i];
-          break;
-        }
-      }
-      if (!chosen) {
-        errorMsg.textContent = 'HEVC not supported via MSE in this browser. Try Safari.';
-        console.error('No supported HEVC codec string found');
-        codecs.forEach(function(c) { console.log('  ' + c + ': ' + MediaSource.isTypeSupported(c)); });
-        return;
-      }
-      console.log('MSE codec: ' + chosen);
-      sourceBuffer = mediaSource.addSourceBuffer(chosen);
-      sourceBuffer.mode = 'segments';
-      sourceBuffer.addEventListener('updateend', flushQueue);
-      connectWebSocket();
+  // FINALIZING
+  var finalizingMsg    = document.getElementById('finalizing-msg');
+  var finalizingDetail = document.getElementById('finalizing-detail');
+
+  // ---- state ----
+  var currentPage = 'INDEX';
+  var sessionState = 'STANDBY';
+  var wsSetup = false;
+  var mediaSource = null;
+  var sourceBuffer = null;
+  var queue = [];
+  var appending = false;
+  var ws = null;
+  var pollTimer = null;
+  var lastSessions = [];
+  var lastRecordings = [];
+
+  // ---- page switching ----
+  function showPage(name) {
+    if (currentPage === name) return;
+    Object.keys(pages).forEach(function(k) {
+      pages[k].classList.remove('active');
     });
-  }
+    if (pages[name]) pages[name].classList.add('active');
+    currentPage = name;
 
-  function flushQueue() {
-    if (queue.length === 0 || !sourceBuffer || sourceBuffer.updating) {
-      appending = false;
-      return;
+    if (name === 'CAPTURING' && !wsSetup) {
+      wsSetup = true;
+      initPlayer();
     }
-    appending = true;
-    const chunk = queue.shift();
-    try {
-      sourceBuffer.appendBuffer(chunk);
-    } catch (e) {
-      // QuotaExceededError — evict old data
-      if (e.name === 'QuotaExceededError' && sourceBuffer.buffered.length > 0) {
-        const start = sourceBuffer.buffered.start(0);
-        const end = sourceBuffer.buffered.end(0);
-        if (end - start > 10) {
-          sourceBuffer.remove(start, end - 5);
-        }
-      }
-    }
-  }
-
-  function appendChunk(data) {
-    queue.push(data);
-    if (!appending && sourceBuffer && !sourceBuffer.updating) {
-      flushQueue();
-    }
-  }
-
-  function connectWebSocket() {
-    var wsPort = parseInt(location.port || '8090') + 1;
-    var wsUrl = 'ws://' + location.hostname + ':' + wsPort;
-    const ws = new WebSocket(wsUrl);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = function() {
-      errorMsg.style.display = 'none';
-    };
-
-    ws.onmessage = function(event) {
-      appendChunk(new Uint8Array(event.data));
-
-      // auto-play once we have data
-      if (video.paused) {
-        video.play().catch(function() {});
-      }
-
-      // keep playback near live edge: if buffered and behind, skip forward
-      try {
-        if (sourceBuffer && !sourceBuffer.updating &&
-            mediaSource.readyState === 'open' &&
-            sourceBuffer.buffered.length > 0) {
-          const bufEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-          if (bufEnd - video.currentTime > 2.0) {
-            video.currentTime = bufEnd - 0.3;
-          }
-        }
-      } catch (e) {}  // ignore InvalidStateError during transitions
-    };
-
-    ws.onclose = function() {
-      errorMsg.textContent = 'Stream disconnected. Reconnecting...';
-      errorMsg.style.display = 'block';
-      setTimeout(connectWebSocket, 2000);
-    };
-
-    ws.onerror = function() {
+    if (name !== 'CAPTURING' && ws) {
       ws.close();
-    };
+      ws = null;
+    }
+
+    clearInterval(pollTimer);
+    var interval = name === 'CAPTURING' ? 500 : name === 'FINALIZING' ? 1000 : 2000;
+    pollTimer = setInterval(pollStatus, interval);
   }
-
-  initPlayer();
-
-  // ---- mute toggle ----
-  var muteBtn = document.getElementById('mute-btn');
-  muteBtn.addEventListener('click', function() {
-    video.muted = !video.muted;
-    video.volume = 1.0;
-    muteBtn.textContent = video.muted ? 'Unmute' : 'Mute';
-    console.log('muted=' + video.muted + ' volume=' + video.volume);
-  });
 
   // ---- status polling ----
-  function formatTime(secs) {
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = Math.floor(secs % 60);
-    return [h, m, s].map(function(v) { return String(v).padStart(2, '0'); }).join(':');
-  }
-
   async function pollStatus() {
     var data = await apiCall('/api/status');
     if (!data) return;
-    updateUI(data);
-    if (data.recording_elapsed !== null) {
-      recElapsedEl.textContent = 'REC ' + formatTime(data.recording_elapsed);
-    } else {
-      recElapsedEl.textContent = '';
+
+    if (data.state === 'INDEX') {
+      showPage('INDEX');
+      updateIndex(data);
+    } else if (data.state === 'CAPTURING') {
+      showPage('CAPTURING');
+      updateCapturing(data);
+    } else if (data.state === 'FINALIZING') {
+      showPage('FINALIZING');
+      updateFinalizing(data);
     }
   }
 
-  setInterval(pollStatus, 500);
   pollStatus();
+  pollTimer = setInterval(pollStatus, 2000);
 
-  // ---- timecode display (from video.currentTime) ----
-  function updateTimecode() {
-    if (video.currentTime > 0) {
-      elapsedEl.textContent = formatTime(video.currentTime);
+  // ---- INDEX ----
+  function fmtSize(bytes) {
+    if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
+    return (bytes / 1e6).toFixed(0) + ' MB';
+  }
+
+  function updateIndex(data) {
+    lastSessions   = data.sessions   || [];
+    lastRecordings = data.recordings || [];
+
+    if (lastSessions.length === 0) {
+      sessionsList.innerHTML = '<div class="no-files">No session files.</div>';
+      btnDeleteAllSessions.disabled = true;
+    } else {
+      sessionsList.innerHTML = lastSessions.map(function(s) {
+        return '<div class="file-row">'
+          + '<span class="file-name"><a href="/view?file=' + encodeURIComponent(s.name) + '">' + escHtml(s.name) + '</a></span>'
+          + '<span class="file-size">' + fmtSize(s.size) + '</span>'
+          + '<button class="btn-del" data-type="session" data-name="' + escAttr(s.name) + '">Delete</button>'
+          + '</div>';
+      }).join('');
+      btnDeleteAllSessions.disabled = false;
     }
-    requestAnimationFrame(updateTimecode);
+
+    if (lastRecordings.length === 0) {
+      recordingsList.innerHTML = '<div class="no-files">No recordings.</div>';
+      btnDeleteAllRecordings.disabled = true;
+    } else {
+      recordingsList.innerHTML = lastRecordings.map(function(r) {
+        return '<div class="file-row">'
+          + '<span class="file-name"><a href="/view?file=' + encodeURIComponent(r.name) + '">' + escHtml(r.name) + '</a></span>'
+          + '<span class="file-size">' + fmtSize(r.size) + '</span>'
+          + '<button class="btn-del" data-type="recording" data-name="' + escAttr(r.name) + '">Delete</button>'
+          + '</div>';
+      }).join('');
+      btnDeleteAllRecordings.disabled = false;
+    }
   }
-  requestAnimationFrame(updateTimecode);
 
+  // delete single via event delegation
+  document.getElementById('file-list').addEventListener('click', async function(e) {
+    var btn = e.target.closest('.btn-del');
+    if (!btn) return;
+    var name = btn.dataset.name;
+    var type = btn.dataset.type;
+    if (!confirm('Delete ' + name + '?\nThis cannot be undone.')) return;
+    if (type === 'session') {
+      await apiDelete('/api/session/' + encodeURIComponent(name));
+    } else {
+      await apiDelete('/api/recording/' + encodeURIComponent(name));
+    }
+    pollStatus();
+  });
 
-  // ---- record button ----
-  async function apiCall(path) {
-    try {
-      var res = await fetch(path);
-      if (res.ok) return await res.json();
-    } catch (e) {}
-    return null;
+  // delete all sessions
+  btnDeleteAllSessions.addEventListener('click', async function() {
+    if (lastSessions.length === 0) return;
+    var count = lastSessions.length;
+    var totalBytes = lastSessions.reduce(function(a, s) { return a + s.size; }, 0);
+    if (!confirm('Delete all ' + count + ' session file(s)?\nThis cannot be undone.')) return;
+    if (!confirm('This will free ' + fmtSize(totalBytes) + ' of disk space. Continue?')) return;
+    await apiDelete('/api/sessions');
+    pollStatus();
+  });
+
+  // delete all recordings
+  btnDeleteAllRecordings.addEventListener('click', async function() {
+    if (lastRecordings.length === 0) return;
+    var count = lastRecordings.length;
+    var totalBytes = lastRecordings.reduce(function(a, r) { return a + r.size; }, 0);
+    if (!confirm('Delete all ' + count + ' recording(s)?\nThis cannot be undone.')) return;
+    if (!confirm('This will free ' + fmtSize(totalBytes) + ' of disk space. Continue?')) return;
+    await apiDelete('/api/recordings');
+    pollStatus();
+  });
+
+  btnStart.addEventListener('click', async function() {
+    btnStart.disabled = true;
+    var data = await apiPost('/api/start');
+    btnStart.disabled = false;
+    if (data) pollStatus();
+  });
+
+  // ---- CAPTURING ----
+  function formatTime(secs) {
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = Math.floor(secs % 60);
+    return [h, m, s].map(function(v) { return String(v).padStart(2, '0'); }).join(':');
   }
 
-  function updateUI(data) {
-    if (!data) return;
-    currentState = data.state;
-    if (data.state === 'RECORDING') {
+  function updateCapturing(data) {
+    sessionState = data.session_state || 'STANDBY';
+
+    if (sessionState === 'RECORDING') {
       recordBtn.textContent = 'Stop';
       recordBtn.className = 'recording';
       badge.textContent = 'RECORDING';
@@ -343,35 +395,196 @@
       badge.textContent = 'STANDBY';
       badge.className = 'standby';
     }
-    if (data.segments && data.segments.length > 0) {
-      segCountEl.textContent = data.segments.length + ' segment(s) marked';
+
+    if (data.recording_elapsed !== null && data.recording_elapsed !== undefined) {
+      recElapsedEl.textContent = 'REC ' + formatTime(data.recording_elapsed);
+    } else {
+      recElapsedEl.textContent = '';
     }
+
+    var segCount = data.segments ? data.segments.length : 0;
+    segCountEl.textContent = segCount > 0 ? segCount + ' segment(s)' : '';
+    completeBtn.disabled = segCount === 0 || sessionState === 'RECORDING';
+
     if (data.warnings && data.warnings.length > 0) {
       var w = data.warnings;
       var prefix = w.length > 1 ? '[' + w.length + ' warnings] ' : '';
-      warningsBanner.textContent = 'WARNING: ' + prefix + w[w.length - 1];
-      warningsBanner.style.display = 'block';
+      warnBanner.textContent = 'WARNING: ' + prefix + w[w.length - 1];
+      warnBanner.style.display = 'block';
     } else {
-      warningsBanner.style.display = 'none';
+      warnBanner.style.display = 'none';
     }
   }
 
-  recordBtn.addEventListener('click', async function() {
-    var endpoint = currentState === 'RECORDING'
-      ? '/api/mark-out'
-      : '/api/mark-in';
-    var streamTime = video.currentTime || 0;
-    var data = await apiCall(endpoint + '?t=' + streamTime.toFixed(3));
-    updateUI(data);
+  // timecode from video.currentTime (runs always)
+  (function tickTimecode() {
+    if (video.currentTime > 0) elapsedEl.textContent = formatTime(video.currentTime);
+    requestAnimationFrame(tickTimecode);
+  })();
+
+  muteBtn.addEventListener('click', function() {
+    video.muted = !video.muted;
+    video.volume = 1.0;
+    muteBtn.textContent = video.muted ? 'Unmute' : 'Mute';
   });
 
-  // ---- keyboard shortcut: space to toggle record ----
+  recordBtn.addEventListener('click', async function() {
+    var endpoint = sessionState === 'RECORDING' ? '/api/mark-out' : '/api/mark-in';
+    var t = (video.currentTime || 0).toFixed(3);
+    var data = await apiCall(endpoint + '?t=' + t);
+    if (data) updateCapturing(data);
+  });
+
+  completeBtn.addEventListener('click', async function() {
+    completeBtn.disabled = true;
+    await apiPost('/api/complete');
+    pollStatus();
+  });
+
+  abortBtn.addEventListener('click', async function() {
+    if (!confirm('Abort capture? Session files will be kept on disk.')) return;
+    await apiPost('/api/abort');
+    pollStatus();
+  });
+
+  // keyboard shortcut: space to toggle record
   document.addEventListener('keydown', function(e) {
     if (e.code === 'Space' && e.target === document.body) {
       e.preventDefault();
       recordBtn.click();
     }
   });
+
+  // ---- FINALIZING ----
+  function updateFinalizing(data) {
+    if (data.step === 'stopping_ffmpeg') {
+      finalizingMsg.textContent = 'Stopping capture…';
+      finalizingDetail.textContent = '';
+    } else if (data.step === 'extracting') {
+      finalizingMsg.textContent = 'Extracting recordings…';
+      finalizingDetail.textContent = 'Recording ' + data.recording + ' of ' + data.total;
+    } else {
+      finalizingMsg.textContent = 'Done.';
+      finalizingDetail.textContent = '';
+    }
+  }
+
+  // ---- WebSocket + MSE ----
+  function initPlayer() {
+    if (!('MediaSource' in window)) {
+      wsError.textContent = 'MediaSource API not supported in this browser';
+      return;
+    }
+
+    mediaSource = new MediaSource();
+    video.src = URL.createObjectURL(mediaSource);
+
+    mediaSource.addEventListener('sourceopen', function() {
+      var codecs = [
+        'video/mp4; codecs="hev1.2.4.L120.B0,mp4a.40.2"',
+        'video/mp4; codecs="hvc1.2.4.L120.B0,mp4a.40.2"',
+        'video/mp4; codecs="hev1.1.6.L120.B0,mp4a.40.2"',
+        'video/mp4; codecs="hev1,mp4a.40.2"',
+      ];
+      var chosen = null;
+      for (var i = 0; i < codecs.length; i++) {
+        if (MediaSource.isTypeSupported(codecs[i])) { chosen = codecs[i]; break; }
+      }
+      if (!chosen) {
+        wsError.textContent = 'HEVC not supported via MSE in this browser. Try Safari.';
+        return;
+      }
+      sourceBuffer = mediaSource.addSourceBuffer(chosen);
+      sourceBuffer.mode = 'segments';
+      sourceBuffer.addEventListener('updateend', flushQueue);
+      connectWebSocket();
+    });
+  }
+
+  function flushQueue() {
+    if (queue.length === 0 || !sourceBuffer || sourceBuffer.updating) { appending = false; return; }
+    appending = true;
+    var chunk = queue.shift();
+    try {
+      sourceBuffer.appendBuffer(chunk);
+    } catch (e) {
+      if (e.name === 'QuotaExceededError' && sourceBuffer.buffered.length > 0) {
+        var start = sourceBuffer.buffered.start(0);
+        var end = sourceBuffer.buffered.end(0);
+        if (end - start > 10) sourceBuffer.remove(start, end - 5);
+      }
+    }
+  }
+
+  function appendChunk(data) {
+    queue.push(data);
+    if (!appending && sourceBuffer && !sourceBuffer.updating) flushQueue();
+  }
+
+  function connectWebSocket() {
+    var wsPort = parseInt(location.port || '8090') + 1;
+    ws = new WebSocket('ws://' + location.hostname + ':' + wsPort);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function() { wsError.style.display = 'none'; };
+
+    ws.onmessage = function(event) {
+      appendChunk(new Uint8Array(event.data));
+      if (video.paused) video.play().catch(function() {});
+      try {
+        if (sourceBuffer && !sourceBuffer.updating &&
+            mediaSource.readyState === 'open' &&
+            sourceBuffer.buffered.length > 0) {
+          var bufEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+          if (bufEnd - video.currentTime > 2.0) video.currentTime = bufEnd - 0.3;
+        }
+      } catch (e) {}
+    };
+
+    ws.onclose = function() {
+      if (currentPage !== 'CAPTURING') return;
+      wsError.textContent = 'Stream disconnected. Reconnecting…';
+      wsError.style.display = 'block';
+      setTimeout(connectWebSocket, 2000);
+    };
+
+    ws.onerror = function() { ws.close(); };
+  }
+
+  // ---- helpers ----
+  async function apiCall(path) {
+    try {
+      var res = await fetch(path);
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return null;
+  }
+
+  async function apiPost(path) {
+    try {
+      var res = await fetch(path, { method: 'POST' });
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return null;
+  }
+
+  async function apiDelete(path) {
+    try {
+      var res = await fetch(path, { method: 'DELETE' });
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return null;
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function escAttr(s) {
+    return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
 })();
 </script>
 

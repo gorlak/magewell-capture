@@ -215,15 +215,21 @@ def build_extract_cmd(
 ) -> list[str]:
     """Build ffmpeg argv for stream-copy extraction of a segment.
 
-    A small pad (0.15s) is added to the end to avoid truncating the last
-    audio packet — with -c copy, cuts happen at packet boundaries and the
-    final audio frame can be dropped if it straddles the cut point.
+    -ss and -to are output options (after -i) so both audio and video are cut
+    from the same position.  Input-mode seeking (-ss before -i) jumps to the
+    nearest video keyframe which can be up to one GOP (2 s) before start; audio
+    seeks independently and lands at start exactly, producing up to 2 s of
+    silence at the head of the recording.  Output-mode seeking is slower but
+    eliminates the stream-alignment problem.
+
+    A small pad (0.15 s) is added to the end to avoid dropping the last audio
+    packet when the cut falls on a packet boundary.
     """
     return [
         "ffmpeg", "-hide_banner",
+        "-i", str(source),
         "-ss", f"{start:.3f}",
         "-to", f"{end + 0.15:.3f}",
-        "-i", str(source),
         "-c", "copy",
         "-movflags", "+faststart",
         str(output),
