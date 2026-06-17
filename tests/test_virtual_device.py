@@ -167,6 +167,17 @@ def test_synthetic_record_extract(tmp_path):
         assert _wait_for_state(_PORT_CYCLE, "INDEX", timeout=60.0), (
             "did not return to INDEX after finalization"
         )
+
+        # Verify the recording appears in the /api/status listing while server is
+        # still running.  The listing goes through _RECORDING_NAME_RE; if that regex
+        # doesn't match the filename produced by make_recording_path the file exists
+        # on disk but is invisible to the UI.
+        status = _http_get_json(_PORT_CYCLE, "/api/status")
+        assert status["state"] == "INDEX"
+        assert len(status.get("recordings", [])) == 1, (
+            f"recording not in /api/status listing — _RECORDING_NAME_RE mismatch? "
+            f"files on disk: {list((tmp_path).glob('session_*_starting_*.mp4'))}"
+        )
     finally:
         if proc.returncode is None:
             proc.send_signal(signal.SIGTERM)
@@ -180,7 +191,9 @@ def test_synthetic_record_extract(tmp_path):
     recordings = list(tmp_path.glob("session_*_starting_*.mp4"))
     assert len(recordings) == 1, f"expected 1 recording in {tmp_path}, got {recordings}"
 
-    sessions = list(tmp_path.glob("session_*.json"))
-    assert sessions
+    # session_????????_??????.json matches only the session meta, not recording
+    # metas (session_..._1_starting_5s.json) that glob("session_*.json") also picks up.
+    sessions = list(tmp_path.glob("session_????????_??????.json"))
+    assert sessions, f"no session meta in {tmp_path}"
     meta = json.loads(sessions[0].read_text())
     assert meta["extractions"][0]["status"] == "done"

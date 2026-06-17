@@ -56,8 +56,8 @@ _WARN_PATTERNS = [
 ]
 
 _SESSION_NAME_RE   = re.compile(r"session_\d{8}_\d{6}\.mp4")
-_RECORDING_NAME_RE = re.compile(r"session_\d{8}_\d{6}_\d+_starting_\d+h\d+m\d+s\.mp4")
-_NAME_RE           = re.compile(r"session_\d{8}_\d{6}(?:_\d+_starting_\d+h\d+m\d+s)?\.mp4")
+_RECORDING_NAME_RE = re.compile(r"session_\d{8}_\d{6}_\d+_starting_(?:\d+h)?(?:\d+m)?\d+s\.mp4")
+_NAME_RE           = re.compile(r"session_\d{8}_\d{6}(?:_\d+_starting_(?:\d+h)?(?:\d+m)?\d+s)?\.mp4")
 
 # HEVC Main10 CQ21 @1080p60 ≈ 20 Mbps ≈ 10 GB/hr (measured; see DECISIONS.md)
 _HEVC_BYTES_PER_HOUR = 10 * 1_000_000_000
@@ -151,6 +151,38 @@ class SessionState:
             ],
             "warnings": list(self.warnings),
         }
+
+
+async def _parse_ffmpeg_progress(
+    reader: asyncio.StreamReader,
+    rec_duration: float,
+    progress: dict,
+) -> None:
+    """Consume ffmpeg -progress pipe output and keep progress dict current."""
+    out_time_us = 0
+    speed = 0.0
+    async for line_bytes in reader:
+        line = line_bytes.decode("utf-8", errors="replace").strip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        if key == "out_time_us":
+            try:
+                out_time_us = max(0, int(val))
+            except ValueError:
+                pass
+        elif key == "speed":
+            try:
+                speed = float(val.rstrip("x").strip() or "0")
+            except ValueError:
+                pass
+        elif key == "progress":
+            pct = min(99, int(out_time_us / (rec_duration * 1_000_000) * 100)) if rec_duration > 0 else 0
+            eta_s: int | None = None
+            if speed > 0 and rec_duration > 0:
+                remaining_us = max(0, rec_duration * 1_000_000 - out_time_us)
+                eta_s = round(remaining_us / speed / 1_000_000)
+            progress.update({"pct": pct, "speed": round(speed, 1), "eta_s": eta_s})
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +437,7 @@ class AppContext:
               file=sys.stderr)
         t0 = time.monotonic()
         try:
-            await asyncio.wait_for(self.proc.wait(), timeout=120.0)
+            await asyncio.wait_for(self.proc.wait(), timeout=15.0)
             elapsed = time.monotonic() - t0
             rc = self.proc.returncode
             print(f"[monitor] ffmpeg exited (rc={rc}) in {elapsed:.1f} s", file=sys.stderr)
@@ -414,7 +446,14 @@ class AppContext:
             print(f"[monitor] ffmpeg (pid {pid}) did not exit after {elapsed:.0f} s, killing...",
                   file=sys.stderr)
             self.proc.kill()
-            await self.proc.wait()
+            try:
+                await asyncio.wait_for(self.proc.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                # Process is stuck in an unkillable kernel state (e.g. V4L2/ALSA close).
+                # Proceed with finalization — the orphaned process will be cleaned up
+                # when the kernel call eventually unblocks or the device is reset.
+                print(f"[monitor] ffmpeg (pid {pid}) still running after SIGKILL; proceeding",
+                      file=sys.stderr)
         finally:
             # _pipe_task exits naturally on EOF when ffmpeg closes stdout.
             # Cancel it here to handle abnormal exits (kill, crash) where EOF may
@@ -440,7 +479,14 @@ class AppContext:
             raise ValueError("no recordings marked")
 
         total = len(self.session.segments)
-        self._finalize_progress = {"step": "stopping_ffmpeg", "recording": None, "total": total}
+        try:
+            session_mb = round(self.session_file.stat().st_size / (1024 * 1024))
+        except OSError:
+            session_mb = None
+        self._finalize_progress = {
+            "step": "stopping_ffmpeg", "recording": None, "total": total,
+            "started_at": time.time(), "session_mb": session_mb,
+        }
         self.app_state = AppState.FINALIZING
         self.finalize_task = asyncio.create_task(self._run_finalization())
         return self.status_dict()
@@ -475,23 +521,36 @@ class AppContext:
         self._write_meta(extractions=extractions)
 
         total = len(segments)
-        self._finalize_progress = {"step": "extracting", "recording": 0, "total": total}
+        # update without replacing — preserves started_at from complete_capture
+        self._finalize_progress.update({"step": "extracting", "recording": 0, "total": total})
 
         for i, (start, end) in enumerate(segments):
-            self._finalize_progress["recording"] = i + 1
+            rec_duration = end - start
+            self._finalize_progress.update({
+                "recording": i + 1,
+                "pct": 0, "speed": None, "eta_s": None,
+                "rec_duration_s": round(rec_duration, 1),
+            })
             output = make_recording_path(session_file, i + 1, start)
             print(f"[monitor] extracting {i+1}/{total}: "
-                  f"{start:.1f}s – {end:.1f}s ({end-start:.1f}s) → {output.name}")
+                  f"{start:.1f}s – {end:.1f}s ({rec_duration:.1f}s) → {output.name}")
 
             cmd = build_extract_cmd(session_file, start, end, output)
+            cmd = cmd[:-1] + ["-progress", "pipe:1"] + [cmd[-1]]
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr_bytes = await proc.communicate()
+            stderr_bytes, _ = await asyncio.gather(
+                proc.stderr.read(),
+                _parse_ffmpeg_progress(proc.stdout, rec_duration, self._finalize_progress),
+            )
+            await proc.wait()
 
             if proc.returncode == 0:
+                self._finalize_progress["pct"] = 100
                 size_mb = output.stat().st_size / (1024 * 1024)
                 print(f"  → {output.name} ({size_mb:.1f} MB)")
                 extractions[i].update({"output": output.name, "status": "done"})
@@ -890,10 +949,14 @@ class HTTPServer:
         range_header = headers.get("range", "")
 
         if range_header.startswith("bytes="):
-            spec = range_header[6:]
-            start_s, _, end_s = spec.partition("-")
-            start = int(start_s) if start_s else 0
-            end = int(end_s) if end_s else total - 1
+            spec = range_header[6:].split(",")[0].strip()  # first range only (ignore multi-range)
+            try:
+                start_s, _, end_s = spec.partition("-")
+                start = int(start_s) if start_s else 0
+                end = int(end_s) if end_s else total - 1
+            except ValueError:
+                await self._respond(writer, 416, b"Range Not Satisfiable", "text/plain")
+                return
             end = min(end, total - 1)
             length = end - start + 1
             status_line = "206 Partial Content"

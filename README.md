@@ -17,8 +17,7 @@ scripts/               capture scripts (run via the venv)
   capture_shared.py    shared signal probe + ffmpeg command builders
   web/index.html       browser UI served by monitor.py
 sessions/              runtime scratch space — session and recording files (gitignored)
-config.toml            local config (gitignored; see config.toml.TEMPLATE to get started)
-config.toml.TEMPLATE   self-documented config template — copy to config.toml and edit
+storage/               transfer destination — create or symlink to your target (gitignored)
 Makefile               lifecycle management (make install / run / restart / clean / status)
 DECISIONS.md           design record
 ATTRIBUTIONS.md        third-party / consulted-project credits

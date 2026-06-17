@@ -162,6 +162,7 @@ def _video_encode_args(fps: float) -> list[str]:
         "-bufsize", "160M",
         "-profile:v", "main10",
         "-pix_fmt", "nv12",
+        "-tag:v", "hvc1",
         "-spatial-aq", "1",
         "-g", str(gop),
     ]
@@ -216,7 +217,7 @@ def build_monitor_cmd(
 
     Two separate encode+mux paths (the tee muxer doesn't forward codec
     extradata, producing an empty hvcC that MSE rejects):
-      1. MP4 file (session recording — no faststart, moov written at end)
+      1. Plain MP4 file (session recording)
       2. Fragmented MP4 to pipe for WebSocket+MSE preview
 
     Uses two NVENC sessions (T400 supports 3 concurrent).

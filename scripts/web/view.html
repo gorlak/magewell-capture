@@ -17,7 +17,8 @@
   .back:hover { color: #aaa; }
   h1 { font-size: 14px; color: #666; font-weight: 400; margin-bottom: 24px; font-family: monospace; word-break: break-all; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #555; margin-bottom: 10px; }
-  video { width: 100%; border-radius: 4px; background: #000; display: block; margin-bottom: 36px; }
+  video { width: 100%; border-radius: 4px; background: #000; display: block; margin-bottom: 8px; }
+  #video-error { font-size: 12px; color: #f87171; font-family: monospace; margin-bottom: 28px; min-height: 16px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   td { padding: 5px 0; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
   td.meta-key { font-family: monospace; color: #555; padding-right: 24px; white-space: nowrap; }
@@ -51,7 +52,8 @@
 
 <a class="back" href="/">← Back to index</a>
 <h1 id="page-title"></h1>
-<video id="player" controls></video>
+<video id="player" controls playsinline></video>
+<div id="video-error"></div>
 
 <div id="transfer-section">
   <h2>Transfer</h2>
@@ -79,7 +81,16 @@
   if (!fileName) { window.location.href = '/'; return; }
 
   document.getElementById('page-title').textContent = fileName;
-  document.getElementById('player').src = '/files/' + encodeURIComponent(fileName);
+
+  var player = document.getElementById('player');
+  var videoErrorEl = document.getElementById('video-error');
+  player.addEventListener('error', function() {
+    var codes = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
+    var code = player.error ? player.error.code : 0;
+    var msg = player.error ? player.error.message : '';
+    videoErrorEl.textContent = 'Video error ' + code + ' (' + (codes[code] || 'unknown') + ')' + (msg ? ': ' + msg : '');
+  });
+  player.src = '/files/' + encodeURIComponent(fileName);
 
   var transferBtn   = document.getElementById('transfer-btn');
   var transferBar   = document.getElementById('transfer-bar');

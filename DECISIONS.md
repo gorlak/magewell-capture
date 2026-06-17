@@ -355,6 +355,23 @@ browser-based preview and record in/out control.
   ~3s preview latency (one GOP buffered before first fragment emits, plus
   network/decode). Acceptable for monitoring. Could be reduced by shortening
   the preview output's GOP independently.
+- **`-tag:v hvc1` required for iOS playback.** ffmpeg 7.1 defaults to the
+  `hev1` codec tag for HEVC in MP4. `hev1` stores decoder configuration as
+  in-band parameter sets; `hvc1` stores it in the `hvcC` box. iOS
+  AVFoundation (Safari's native `<video>` element) requires `hvc1`; files
+  tagged `hev1` fail to play on iOS with a `MEDIA_ERR_DECODE` error. Fix:
+  add `-tag:v hvc1` to `_video_encode_args`. Stream copy (`-c copy`) in
+  `build_extract_cmd` inherits the tag from the session file automatically —
+  no `-tag:v` needed on the extract side.
+- **`stop_ffmpeg` D-state hang on shutdown.** After `asyncio.wait_for(proc.wait(),
+  timeout=15s)` times out, `proc.kill()` (SIGKILL) is sent and then
+  `await proc.wait()` is called. If ffmpeg is stuck in an unkillable kernel
+  call — V4L2 or ALSA `close()` in D-state (uninterruptible sleep) — SIGKILL
+  cannot wake it and the bare `await proc.wait()` hangs forever. The asyncio
+  event loop stays live (status polls still work), but finalization never
+  advances. Fix: wrap the post-SIGKILL `proc.wait()` in a 10-second
+  `asyncio.wait_for`; on timeout, log and proceed. The orphaned ffmpeg process
+  clears when the kernel call eventually unblocks or the device is reset.
 
 ### Why this design (alternatives rejected)
 
@@ -550,9 +567,12 @@ Phase 2 deliverables (in addition to Phase 1):
   fMP4 pipe), browser preview via WebSocket+MSE, mark-in/out record control,
   recording extraction on complete. 125 tests passing.
 - `scripts/web/index.html`: capture UI — live HEVC preview, record button,
-  session/recording file management with disk usage bar.
-- `scripts/web/view.html`: recording viewer — playback, metadata table, manual
-  transfer to `storage_dir` with live progress and completion stats.
+  session/recording file management with disk usage bar. Finalizing page shows
+  live extraction progress (%, speed multiplier, ETA, elapsed) via ffmpeg's
+  `-progress pipe:1` output.
+- `scripts/web/view.html`: recording viewer — playback (iOS-compatible `hvc1`
+  tag), error code display, metadata table, manual transfer to `storage_dir`
+  with live progress and completion stats.
 - `Makefile`: lifecycle management — `make install` (udev + venv + systemd service
   on :80), `make run` (dev mode on :8090), `make restart`, `make clean`,
   `make status`.
