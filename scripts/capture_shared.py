@@ -283,14 +283,24 @@ def build_extract_cmd(
 # Output path
 # ---------------------------------------------------------------------------
 
-def make_output_path(output_dir: Path, width: int, height: int,
-                     fps: float, interlaced: bool,
-                     prefix: str = "capture") -> Path:
-    """Generate a timestamped output filename like:
-    capture_20260521_143022_1920x1080p60.mp4
-    """
+def make_output_path(output_dir: Path, prefix: str = "capture") -> Path:
+    """Generate a timestamped output filename like: capture_20260521_143022.mp4"""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    scan = "i" if interlaced else "p"
-    fps_tag = f"{fps:g}"
-    name = f"{prefix}_{ts}_{width}x{height}{scan}{fps_tag}.mp4"
-    return output_dir / name
+    return output_dir / f"{prefix}_{ts}.mp4"
+
+
+def make_recording_path(session_file: Path, segment_index: int, start_seconds: float) -> Path:
+    """Derive a recording filename from its session, e.g.:
+    session_20260617_104429_1_starting_2m30s.mp4
+    Leading zero components (hours, then minutes) are omitted.
+    """
+    total = int(start_seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    parts.append(f"{s}s")
+    return session_file.parent / f"{session_file.stem}_{segment_index}_starting_{''.join(parts)}.mp4"

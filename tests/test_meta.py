@@ -21,8 +21,8 @@ from monitor import AppContext, AppState, SessionState, _atomic_write_json
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_capturing_ctx(tmp_path: Path, transfer_dest: Path | None = None) -> AppContext:
-    ctx = AppContext(tmp_path, transfer_dest=transfer_dest)
+def _make_capturing_ctx(tmp_path: Path, storage_dir: Path | None = None) -> AppContext:
+    ctx = AppContext(tmp_path, storage_dir=storage_dir)
     ctx.app_state = AppState.CAPTURING
     ctx.session = SessionState(time.monotonic())
     ctx.session_file = tmp_path / "session_test.mp4"
@@ -174,7 +174,10 @@ class TestRunFinalization:
         ctx.app_state = AppState.CAPTURING
         ctx.session = SessionState(time.monotonic())
         ctx.session.segments.append((2.0, 6.0))
-        ctx.session_file = stub_mp4
+        # Symlink stub into tmp_path so make_recording_path puts recordings here too.
+        session_link = tmp_path / "session_stub.mp4"
+        session_link.symlink_to(stub_mp4)
+        ctx.session_file = session_link
         ctx.meta_path = tmp_path / "session_stub.json"
         ctx.signal_info = (320, 240, 30.0, False)
         ctx.started_at = datetime.now()
@@ -184,7 +187,7 @@ class TestRunFinalization:
         ctx, _ = self._make_ctx(tmp_path, stub_mp4)
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
-        assert len(list(tmp_path.glob("recording_*.mp4"))) == 1
+        assert len(list(tmp_path.glob("*_starting_*.mp4"))) == 1
 
     async def test_meta_status_done(self, tmp_path, stub_mp4):
         ctx, meta_path = self._make_ctx(tmp_path, stub_mp4)
@@ -199,7 +202,7 @@ class TestRunFinalization:
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
         meta = json.loads(meta_path.read_text())
-        local = tmp_path / meta["extractions"][0]["output"]
+        local = tmp_path / Path(meta["extractions"][0]["output"]).name
         assert local.exists()
 
     async def test_state_returns_to_index(self, tmp_path, stub_mp4):

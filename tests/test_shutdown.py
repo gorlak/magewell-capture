@@ -137,7 +137,7 @@ def test_shutdown_exits_within_7s_with_ws_client_connected(tmp_path):
     """
     proc = subprocess.Popen(
         [str(PYTHON), str(MONITOR),
-         "--output-dir", str(tmp_path),
+         "--sessions-dir", str(tmp_path),
          "--port", str(_HTTP_PORT_1)],
         stderr=subprocess.PIPE,
     )
@@ -191,7 +191,7 @@ def test_session_file_has_valid_moov_after_shutdown(tmp_path):
     """
     proc = subprocess.Popen(
         [str(PYTHON), str(MONITOR),
-         "--output-dir", str(tmp_path),
+         "--sessions-dir", str(tmp_path),
          "--port", str(_HTTP_PORT_2)],
         stderr=subprocess.PIPE,
     )

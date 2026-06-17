@@ -131,13 +131,13 @@ async def test_http_get_status_index(http_server):
 
 async def test_status_includes_file_listing(http_server):
     ctx, port = http_server
-    # Create a fake session file in the output dir
-    (ctx.output_dir / "session_20260615_120000_1920x1080p60.mp4").write_bytes(b"")
+    # Create a fake session file in the sessions dir
+    (ctx.sessions_dir / "session_20260615_120000.mp4").write_bytes(b"")
     status, body = await _http_get(port, "/api/status")
     assert status == 200
     data = json.loads(body)
     assert len(data["sessions"]) == 1
-    assert data["sessions"][0]["name"] == "session_20260615_120000_1920x1080p60.mp4"
+    assert data["sessions"][0]["name"] == "session_20260615_120000.mp4"
 
 
 async def test_start_in_non_index_state_returns_409(capturing_http_server):
@@ -214,7 +214,7 @@ async def test_complete_with_no_segments_returns_409(capturing_http_server):
     status, body = await _http_post(port, "/api/complete")
     assert status == 409
     data = json.loads(body)
-    assert "no segments" in data["error"]
+    assert "no recordings" in data["error"]
 
 
 # ---------------------------------------------------------------------------

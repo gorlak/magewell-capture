@@ -8,6 +8,7 @@
 *.egg-info/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # environment
 .venv/
@@ -15,11 +16,14 @@ __pycache__/
 # Claude Code
 .claude/
 
+# macOS
+.DS_Store
+
 # build scratch
 **/linkstubs/
 
 # local runtime data (gitignored — recreated at runtime)
-sessions/
+sessions
 
-# local config (contains private paths; copy config.toml.TEMPLATE to get started)
-config.toml
+# transfer destination — create this dir or symlink it to your storage target
+storage

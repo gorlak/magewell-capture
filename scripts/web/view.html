@@ -87,6 +87,8 @@
   var transferPaths = document.getElementById('transfer-paths');
 
   var pollTimer = null;
+  var pollInterval = 250;
+  var pollLastPct = -1;
 
   // Load recording meta
   fetch('/api/meta/' + encodeURIComponent(fileName))
@@ -112,10 +114,11 @@
 
   // Button click → POST to trigger transfer
   transferBtn.addEventListener('click', function() {
+    transferBtn.disabled = true;
     fetch('/api/recording/' + encodeURIComponent(fileName) + '/transfer', {method: 'POST'})
       .then(function(r) { return r.json(); })
       .then(function(state) { applyTransferState(state); startPolling(); })
-      .catch(function(e) { showInfo('Request failed: ' + e, '#f87171'); });
+      .catch(function(e) { transferBtn.disabled = false; showInfo('Request failed: ' + e, '#f87171'); });
   });
 
   function applyTransferState(state) {
@@ -163,26 +166,36 @@
 
   function startPolling() {
     if (pollTimer) return;
-    pollTimer = setInterval(function() {
+    schedulePoll();
+  }
+
+  function schedulePoll() {
+    pollTimer = setTimeout(function() {
+      pollTimer = null;
       fetch('/api/recording/' + encodeURIComponent(fileName) + '/transfer')
         .then(function(r) { return r.json(); })
         .then(function(state) {
           if (state.state === 'running') {
+            var pct = state.pct || 0;
+            pollInterval = (pct !== pollLastPct) ? 250 : Math.min(pollInterval * 2, 5000);
+            pollLastPct = pct;
             updateProgress(state);
+            schedulePoll();
           } else if (state.state === 'done') {
             showDone(state);
           } else if (state.state === 'failed') {
-            clearPolling();
             transferBtn.disabled = false;
             showInfo('⚠ ' + (state.error || 'unknown error'), '#f87171');
           }
         })
-        .catch(function() {});
-    }, 500);
+        .catch(function() { schedulePoll(); });
+    }, pollInterval);
   }
 
   function clearPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    pollInterval = 250;
+    pollLastPct = -1;
   }
 
   function flatten(val, prefix) {

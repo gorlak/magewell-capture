@@ -12,6 +12,7 @@ from capture_shared import (
     build_monitor_cmd,
     fps_to_ffmpeg,
     make_output_path,
+    make_recording_path,
 )
 
 
@@ -158,8 +159,8 @@ class TestBuildMonitorCmd:
 
     def test_file_has_no_faststart(self):
         # The session file must NOT use faststart: moov is written at the end
-        # of the recording (duration unknown up front), and the pipe-drain
-        # shutdown fix relies on ffmpeg being able to write moov after SIGINT.
+        # (duration unknown up front); faststart would require a full file rewrite
+        # on stop, making shutdown proportional to session file size.
         cmd = self._build()
         file_idx = cmd.index("/tmp/session.mp4")
         # Check only the flags that precede the file output (not the pipe flags)
@@ -251,32 +252,59 @@ class TestBuildExtractCmd:
 # ---------------------------------------------------------------------------
 
 class TestMakeOutputPath:
-    def test_contains_resolution(self):
-        p = make_output_path(Path("/tmp"), 1920, 1080, 59.94, False)
-        assert "1920x1080" in p.name
-
-    def test_progressive_scan(self):
-        p = make_output_path(Path("/tmp"), 1920, 1080, 60.0, False)
-        assert "p60" in p.name
-
-    def test_interlaced_scan(self):
-        p = make_output_path(Path("/tmp"), 720, 480, 29.97, True)
-        assert "i29.97" in p.name
-
     def test_mp4_extension(self):
-        p = make_output_path(Path("/tmp"), 1920, 1080, 60.0, False)
-        assert p.suffix == ".mp4"
-
-    def test_custom_prefix(self):
-        p = make_output_path(
-            Path("/tmp"), 1920, 1080, 60.0, False, prefix="session"
-        )
-        assert p.name.startswith("session_")
+        assert make_output_path(Path("/tmp")).suffix == ".mp4"
 
     def test_default_prefix(self):
-        p = make_output_path(Path("/tmp"), 1920, 1080, 60.0, False)
-        assert p.name.startswith("capture_")
+        assert make_output_path(Path("/tmp")).name.startswith("capture_")
+
+    def test_custom_prefix(self):
+        assert make_output_path(Path("/tmp"), prefix="session").name.startswith("session_")
 
     def test_output_in_correct_dir(self):
-        p = make_output_path(Path("/tmp/captures"), 1920, 1080, 60.0, False)
-        assert p.parent == Path("/tmp/captures")
+        assert make_output_path(Path("/tmp/captures")).parent == Path("/tmp/captures")
+
+    def test_no_resolution_in_name(self):
+        p = make_output_path(Path("/tmp"), prefix="session")
+        assert "x" not in p.stem  # no WxH
+        assert "p" not in p.stem.split("_")[-1]  # no scan tag
+
+
+class TestMakeRecordingPath:
+    def _session(self) -> Path:
+        return Path("/tmp/sessions/session_20260617_104429.mp4")
+
+    def test_derives_from_session_stem(self):
+        p = make_recording_path(self._session(), 1, 0.0)
+        assert p.stem.startswith("session_20260617_104429_")
+
+    def test_recording_index(self):
+        p = make_recording_path(self._session(), 3, 0.0)
+        assert "_3_starting_" in p.name
+
+    def test_time_notation_full(self):
+        p = make_recording_path(self._session(), 1, 3723.0)  # 1h2m3s
+        assert "_starting_1h2m3s" in p.name
+
+    def test_time_notation_omits_zero_hours(self):
+        p = make_recording_path(self._session(), 1, 150.0)  # 2m30s
+        assert "_starting_2m30s" in p.name
+
+    def test_time_notation_omits_zero_hours_and_minutes(self):
+        p = make_recording_path(self._session(), 1, 45.0)  # 45s
+        assert "_starting_45s" in p.name
+
+    def test_time_notation_omits_zero_minutes_when_hours_present(self):
+        p = make_recording_path(self._session(), 1, 3630.0)  # 1h0m30s → 1h30s
+        assert "_starting_1h30s" in p.name
+
+    def test_zero_time(self):
+        p = make_recording_path(self._session(), 1, 0.0)
+        assert "_starting_0s" in p.name
+
+    def test_same_dir_as_session(self):
+        p = make_recording_path(self._session(), 1, 60.0)
+        assert p.parent == Path("/tmp/sessions")
+
+    def test_mp4_extension(self):
+        assert make_recording_path(self._session(), 1, 0.0).suffix == ".mp4"

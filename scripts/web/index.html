@@ -30,12 +30,18 @@
     gap: 32px;
   }
   #page-index h1 { font-size: 22px; color: #aaa; font-weight: 400; }
+  #start-row {
+    display: flex; align-items: center; gap: 16px;
+    width: 100%; max-width: 760px;
+  }
   #btn-start {
+    flex-shrink: 0;
     background: #2563eb; color: #fff;
-    font-size: 18px; padding: 14px 48px;
+    font-size: 14px; padding: 8px 20px;
   }
   #btn-start:hover { background: #3b82f6; }
-  #disk-bar-wrap { width: 100%; max-width: 760px; }
+  #btn-start:disabled { background: #1e3a5f; color: #4a7ab5; }
+  #disk-bar-wrap { flex: 1; }
   #disk-label { font-size: 12px; color: #555; margin-bottom: 5px; }
   #disk-track {
     height: 4px; background: #222; border-radius: 2px; overflow: hidden;
@@ -135,7 +141,7 @@
   #complete-btn:hover:not(:disabled) { background: #22c55e; }
   #abort-btn { background: #374151; color: #aaa; font-size: 13px; padding: 8px 16px; }
   #abort-btn:hover { background: #4b5563; }
-  #segment-count { font-size: 13px; color: #888; min-width: 80px; }
+  #recording-count { font-size: 13px; color: #888; min-width: 80px; }
 
   /* ---- FINALIZING ---- */
   #page-finalizing {
@@ -159,10 +165,12 @@
 <!-- INDEX -->
 <div id="page-index" class="page active">
   <h1>Capture Monitor</h1>
-  <button id="btn-start">Start Capture</button>
-  <div id="disk-bar-wrap">
-    <div id="disk-label"></div>
-    <div id="disk-track"><div id="disk-fill"></div></div>
+  <div id="start-row">
+    <button id="btn-start">Start Capture</button>
+    <div id="disk-bar-wrap">
+      <div id="disk-label"></div>
+      <div id="disk-track"><div id="disk-fill"></div></div>
+    </div>
   </div>
   <div id="file-list">
     <div class="file-section" id="sessions-section">
@@ -197,7 +205,7 @@
   <div id="controls">
     <button id="mute-btn">Unmute</button>
     <button id="record-btn" class="standby">Record</button>
-    <span id="segment-count"></span>
+    <span id="recording-count"></span>
     <button id="complete-btn" disabled>Complete</button>
     <button id="abort-btn">Abort</button>
   </div>
@@ -239,7 +247,7 @@
   var warnBanner   = document.getElementById('warnings-banner');
   var muteBtn      = document.getElementById('mute-btn');
   var recordBtn    = document.getElementById('record-btn');
-  var segCountEl   = document.getElementById('segment-count');
+  var recCountEl   = document.getElementById('recording-count');
   var completeBtn  = document.getElementById('complete-btn');
   var abortBtn     = document.getElementById('abort-btn');
 
@@ -430,9 +438,9 @@
       recElapsedEl.textContent = '';
     }
 
-    var segCount = data.segments ? data.segments.length : 0;
-    segCountEl.textContent = segCount > 0 ? segCount + ' segment(s)' : '';
-    completeBtn.disabled = segCount === 0 || sessionState === 'RECORDING';
+    var recCount = data.segments ? data.segments.length : 0;
+    recCountEl.textContent = recCount > 0 ? recCount + ' recording(s)' : '';
+    completeBtn.disabled = recCount === 0 || sessionState === 'RECORDING';
 
     if (data.warnings && data.warnings.length > 0) {
       var w = data.warnings;

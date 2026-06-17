@@ -3,9 +3,9 @@
 ## P3 — Disk space, file management, and output configuration
 
 ### Configuration ✅
-Repo-local `config.toml` (gitignored). Single key: `transfer_dest`.
-If absent, recordings copy to `~/Downloads`. Sessions scratch dir: `./sessions/`
-(gitignored). See `config.toml.TEMPLATE` to get started.
+Two gitignored repo-local directories: `sessions/` (scratch, auto-created) and
+`storage/` (transfer destination — create or symlink to your target). Override
+with `--storage-dir DIR` at the command line.
 
 ### INDEX page: disk status ✅
 Disk bar showing hours remaining (HEVC @20 Mbps) and free/total. Turns red
@@ -16,12 +16,26 @@ Low-disk warning (< 4 h remaining) added to the stall-detector background
 task; surfaces as a warnings banner in the CAPTURING UI.
 
 ### Network share transfer ✅
-Manual transfer via the `/view` page Transfer button. `--transfer-dest DIR`
-flag (or `config.toml`) sets the destination. Uses `rsync --inplace` (300 s
-timeout) — `--inplace` avoids the temp-file-then-rename that CIFS mounts block.
+Manual transfer via the `/view` page Transfer button. `--storage-dir DIR`
+flag sets the destination (default: `storage/` symlink in repo root). Uses
+`rsync --inplace` (300 s timeout) — `--inplace` avoids the temp-file-then-rename
+that CIFS mounts block.
 Progress (pct, live MB/s) and completion stats (size, elapsed, avg bandwidth)
 are shown and persist on the view page. Local copy is never removed by transfer
 — cleanup is via the delete UI on the index page.
+
+
+## P5 — Evaluate bitrate and recording disk size
+
+Current ffmpeg command uses hardcoded HEVC settings. Need to capture some real
+content and assess: are recordings the right size? Is quality sufficient? Is the
+disk-hours estimate (@ 20 Mbps) accurate for real output, or does the actual
+bitrate differ enough to matter?
+
+- Capture a representative session (mix of motion and static content)
+- Check actual output bitrate via `ffprobe`
+- Compare to the 20 Mbps constant used in the disk-hours estimate
+- Consider whether a configurable bitrate target belongs in `config.toml`
 
 
 ## P4 — Tests still wanted
@@ -35,16 +49,3 @@ are shown and persist on the view page. Local copy is never removed by transfer
   warning recorded, background tasks cancelled
 
 
-## Optional
-
-### Resume extraction from pending meta
-
-When FINALIZING crashes or is interrupted, the session meta file may contain
-extractions with `"status": "pending"`. On INDEX load, any session whose `.json`
-has pending extractions and whose `.mp4` still exists could show a
-**Resume extraction** action that re-runs only the pending segments.
-
-Requires a `/api/resume/<session-name>` endpoint that reads the pending
-extractions from the meta file and runs them through the existing
-`_run_finalization` path. The INDEX listing already has `has_meta` — the
-UI hook is there; just needs wiring up.

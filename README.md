@@ -84,28 +84,16 @@ INSTALL ←── make restart ── INSTALL ───────────�
 
 ## Configuration
 
-`monitor.py` reads an optional `config.toml` in the repo root (gitignored).
-Copy the template to get started:
+Two gitignored directories live at the repo root:
+
+- `sessions/` — scratch space for raw captures and extracted recordings. Created automatically on first run.
+- `storage/` — transfer destination for the Transfer button on `/view`. Create this directory or symlink it to wherever you want recordings to land:
 
 ```bash
-cp config.toml.TEMPLATE config.toml
-# edit config.toml — set transfer_dest to your desired destination
+ln -s /mnt/jarvis-incoming storage
 ```
 
-Currently the only supported key is:
-
-| Key | Description |
-|-----|-------------|
-| `transfer_dest` | Absolute path to copy each finished recording to after extraction. The local copy in `sessions/` is removed on success. Defaults to `~/Downloads` if absent. |
-
-Example:
-
-```toml
-transfer_dest = "/mnt/jarvis-incoming"
-```
-
-`sessions/` (the scratch directory for raw session captures and pre-transfer
-recordings) is also gitignored. It is created automatically on first run.
+If `storage/` does not exist, the Transfer button returns an error until it is created or symlinked. Use `--storage-dir DIR` to override the path at the command line.
 
 ## How it works
 
@@ -118,7 +106,7 @@ Both scripts share the same signal probe and encoding logic via `capture_shared.
 2. Falls back to 1920×1080@60 if no locked signal is detected.
 3. Launches ffmpeg: V4L2 YUYV 4:2:2 + direct ALSA audio → HEVC NVENC (Main10,
    VBR CQ21, preset p6, 80M ceiling) + AAC 192k → timestamped MP4 with
-   `faststart` (e.g. `capture_20260521_143022_1920x1080p60.mp4`).
+   `faststart` (e.g. `capture_20260521_143022.mp4`).
 4. Ctrl-C is handled by letting ffmpeg receive SIGINT directly (same process
    group); Python ignores the signal and waits. This ensures ffmpeg completes
    its `faststart` second pass and the file is properly finalized.
@@ -138,7 +126,9 @@ Both scripts share the same signal probe and encoding logic via `capture_shared.
    a timecode overlay driven by `video.currentTime`, and displays a
    STANDBY/RECORDING badge. The Record button (or Space bar) sends mark-in and
    mark-out requests with the browser's current stream timestamp.
-5. On shutdown (Ctrl-C / SIGTERM), any open recording segment is closed, then
-   ffmpeg extracts each marked segment from the session file using stream-copy
-   (`-c copy`) — no re-encode. The session file is retained alongside the
-   extracted recordings.
+5. On shutdown (Ctrl-C / SIGTERM), any open recording is closed, then ffmpeg
+   extracts each marked recording from the session file using stream-copy
+   (`-c copy`) — no re-encode. Output files are named
+   `session_YYYYMMDD_HHMMSS_N_starting_<offset>.mp4` where `<offset>` is the
+   start time within the session (e.g. `2m30s`, `1h15m4s`) with leading zero
+   components omitted. The session file is retained alongside the recordings.

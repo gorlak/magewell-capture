@@ -77,7 +77,7 @@ def _start_synthetic(tmp_path: Path, port: int, extra_args: list[str] | None = N
     cmd = [
         str(PYTHON), str(MONITOR),
         "--synthetic",
-        "--output-dir", str(tmp_path),
+        "--sessions-dir", str(tmp_path),
         "--port", str(port),
     ]
     if extra_args:
@@ -176,8 +176,8 @@ def test_synthetic_record_extract(tmp_path):
                 proc.kill()
                 proc.wait()
 
-    # Recording stays in output dir — transfer is now manual via /view page.
-    recordings = list(tmp_path.glob("recording_*.mp4"))
+    # Recording stays in sessions dir — transfer is now manual via /view page.
+    recordings = list(tmp_path.glob("session_*_starting_*.mp4"))
     assert len(recordings) == 1, f"expected 1 recording in {tmp_path}, got {recordings}"
 
     sessions = list(tmp_path.glob("session_*.json"))

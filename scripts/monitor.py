@@ -13,7 +13,7 @@ State machine:
 See DECISIONS.md for design rationale.
 
 Usage:
-    .venv/bin/python scripts/monitor.py [--output-dir DIR] [--port PORT]
+    .venv/bin/python scripts/monitor.py [--sessions-dir DIR] [--port PORT]
 """
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ import signal
 import socket
 import sys
 import time
-import tomllib
 from datetime import datetime, timedelta
 from enum import Enum
 from http import HTTPStatus
@@ -40,6 +39,7 @@ from capture_shared import (
     build_extract_cmd,
     build_monitor_cmd,
     make_output_path,
+    make_recording_path,
     probe_signal,
 )
 
@@ -55,28 +55,16 @@ _WARN_PATTERNS = [
     re.compile(r"NVENC.+[Ee]rror|[Ee]rror.+NVENC"),
 ]
 
-_NAME_RE = re.compile(r"(session|recording)_[\w.]+\.mp4")
-_SESSION_NAME_RE = re.compile(r"session_[\w.]+\.mp4")
-_RECORDING_NAME_RE = re.compile(r"recording_[\w.]+\.mp4")
+_SESSION_NAME_RE   = re.compile(r"session_\d{8}_\d{6}\.mp4")
+_RECORDING_NAME_RE = re.compile(r"session_\d{8}_\d{6}_\d+_starting_\d+h\d+m\d+s\.mp4")
+_NAME_RE           = re.compile(r"session_\d{8}_\d{6}(?:_\d+_starting_\d+h\d+m\d+s)?\.mp4")
 
 # HEVC Main10 CQ21 @1080p60 ≈ 20 Mbps ≈ 10 GB/hr (measured; see DECISIONS.md)
 _HEVC_BYTES_PER_HOUR = 10 * 1_000_000_000
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = _REPO_ROOT / "config.toml"
-_DEFAULT_OUTPUT_DIR = _REPO_ROOT / "sessions"
-_DEFAULT_TRANSFER_DEST = Path.home() / "Downloads"
-
-
-def _load_config(path: Path = CONFIG_PATH) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    except Exception as exc:
-        print(f"[monitor] warning: could not read {path}: {exc}", file=sys.stderr)
-        return {}
+_DEFAULT_SESSIONS_DIR = _REPO_ROOT / "sessions"
+_DEFAULT_STORAGE_DIR = _REPO_ROOT / "storage"
 
 
 # ---------------------------------------------------------------------------
@@ -173,10 +161,10 @@ class AppContext:
     """Shared state for the entire server lifetime."""
 
     def __init__(
-        self, output_dir: Path, transfer_dest: Path | None = None, synthetic: bool = False,
+        self, sessions_dir: Path, storage_dir: Path | None = None, synthetic: bool = False,
     ) -> None:
-        self.output_dir = output_dir
-        self.transfer_dest = transfer_dest
+        self.sessions_dir = sessions_dir
+        self.storage_dir = storage_dir
         self.synthetic = synthetic
         self.app_state = AppState.INDEX
         self.broadcaster = StreamBroadcaster()
@@ -216,21 +204,21 @@ class AppContext:
         sessions: list[dict] = []
         recordings: list[dict] = []
         try:
-            for p in sorted(self.output_dir.glob("*.mp4"), reverse=True):
+            for p in sorted(self.sessions_dir.glob("*.mp4"), reverse=True):
                 size = p.stat().st_size
-                if p.name.startswith("session_"):
+                if _RECORDING_NAME_RE.fullmatch(p.name):
+                    recordings.append({"name": p.name, "size": size})
+                elif _SESSION_NAME_RE.fullmatch(p.name):
                     sessions.append({
                         "name": p.name,
                         "size": size,
                         "has_meta": p.with_suffix(".json").exists(),
                     })
-                elif p.name.startswith("recording_"):
-                    recordings.append({"name": p.name, "size": size})
         except OSError:
             pass
         disk: dict = {}
         try:
-            usage = shutil.disk_usage(self.output_dir)
+            usage = shutil.disk_usage(self.sessions_dir)
             disk = {"free": usage.free, "total": usage.total}
         except OSError:
             pass
@@ -284,14 +272,13 @@ class AppContext:
         _atomic_write_json(output.with_suffix(".json"), meta)
 
     async def _transfer_recording(self, output: Path) -> None:
-        """Transfer a recording to transfer_dest via rsync (user-triggered).
+        """Transfer a recording to storage_dir via rsync (user-triggered).
 
         Updates self._transfers[output.name] with live progress (pct, rate_mbps)
         and on completion with summary stats (size_mb, elapsed_s, avg_mbps).
         The local file is never removed here — cleanup is via the delete UI.
         """
-        assert self.transfer_dest
-        dest = self.transfer_dest / output.name
+        dest = self.storage_dir / output.name
         total_bytes = output.stat().st_size
         size_mb = total_bytes / (1024 * 1024)
         start_t = time.monotonic()
@@ -305,12 +292,12 @@ class AppContext:
         }
         try:
             proc = await asyncio.create_subprocess_exec(
-                "rsync", "--inplace", str(output), str(self.transfer_dest),
+                "rsync", "--inplace", str(output), str(self.storage_dir),
                 stderr=asyncio.subprocess.PIPE,
             )
 
             async def _poll() -> None:
-                prev_done, prev_t = 0, time.monotonic()
+                history: list[tuple[float, int]] = []
                 while True:
                     await asyncio.sleep(0.5)
                     try:
@@ -318,9 +305,15 @@ class AppContext:
                     except FileNotFoundError:
                         done = 0
                     now = time.monotonic()
-                    dt = now - prev_t
-                    rate = (done - prev_done) / dt / (1024 * 1024) if dt > 0 else 0.0
-                    prev_done, prev_t = done, now
+                    history.append((now, done))
+                    cutoff = now - 3.0
+                    history = [(t, b) for t, b in history if t >= cutoff]
+                    if len(history) >= 2:
+                        dt = history[-1][0] - history[0][0]
+                        db = history[-1][1] - history[0][1]
+                        rate = db / dt / (1024 * 1024) if dt > 0 else 0.0
+                    else:
+                        rate = 0.0
                     self._transfers[output.name].update({
                         "pct": int(done * 100 / total_bytes) if total_bytes else 100,
                         "rate_mbps": round(rate, 1),
@@ -363,11 +356,9 @@ class AppContext:
         else:
             width, height, fps, interlaced = probe_signal()
         self.signal_info = (width, height, fps, interlaced)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
-        session_file = make_output_path(
-            self.output_dir, width, height, fps, interlaced, prefix="session"
-        )
+        session_file = make_output_path(self.sessions_dir, prefix="session")
         self.session_file = session_file
         self.meta_path = session_file.with_suffix(".json")
         self.started_at = datetime.now()
@@ -395,33 +386,43 @@ class AppContext:
         self.app_state = AppState.CAPTURING
 
     async def stop_ffmpeg(self) -> None:
-        """Send SIGINT, drain stdout, wait for exit. Does not change app_state."""
+        """Send SIGINT, let _pipe_task drain stdout, wait for exit."""
         if self.proc is None or self.proc.returncode is not None:
             return
 
+        # Set flag first: _read_pipe now drains without broadcasting, so there is
+        # no gap where stdout goes unread between pipe_task cancel and a drain task
+        # start — that gap could fill the pipe buffer and block ffmpeg from exiting.
         self._stopping_ffmpeg = True
 
-        if self._pipe_task:
-            self._pipe_task.cancel()
-            await asyncio.gather(self._pipe_task, return_exceptions=True)
-            self._pipe_task = None
-
-        drain_task = asyncio.create_task(self._drain_stdout())
-
+        pid = self.proc.pid
         try:
             self.proc.send_signal(signal.SIGINT)
         except ProcessLookupError:
             pass  # already exited between the returncode check and here
-        print("[monitor] waiting for ffmpeg to finalize session file...", file=sys.stderr)
+
+        print(f"[monitor] sent SIGINT to ffmpeg (pid {pid}), waiting for finalization...",
+              file=sys.stderr)
+        t0 = time.monotonic()
         try:
             await asyncio.wait_for(self.proc.wait(), timeout=120.0)
+            elapsed = time.monotonic() - t0
+            rc = self.proc.returncode
+            print(f"[monitor] ffmpeg exited (rc={rc}) in {elapsed:.1f} s", file=sys.stderr)
         except asyncio.TimeoutError:
-            print("[monitor] ffmpeg not responding, killing...", file=sys.stderr)
+            elapsed = time.monotonic() - t0
+            print(f"[monitor] ffmpeg (pid {pid}) did not exit after {elapsed:.0f} s, killing...",
+                  file=sys.stderr)
             self.proc.kill()
             await self.proc.wait()
         finally:
-            drain_task.cancel()
-            await asyncio.gather(drain_task, return_exceptions=True)
+            # _pipe_task exits naturally on EOF when ffmpeg closes stdout.
+            # Cancel it here to handle abnormal exits (kill, crash) where EOF may
+            # not arrive promptly.
+            if self._pipe_task:
+                self._pipe_task.cancel()
+                await asyncio.gather(self._pipe_task, return_exceptions=True)
+                self._pipe_task = None
 
         for task in [self._stderr_task, self._stall_task, self._ffmpeg_watcher_task]:
             if task:
@@ -436,7 +437,7 @@ class AppContext:
         assert self.app_state is AppState.CAPTURING and self.session
         self.session.finalize(self.session.elapsed)
         if not self.session.segments:
-            raise ValueError("no segments marked")
+            raise ValueError("no recordings marked")
 
         total = len(self.session.segments)
         self._finalize_progress = {"step": "stopping_ffmpeg", "recording": None, "total": total}
@@ -462,7 +463,7 @@ class AppContext:
         w, h, fps, interlaced = self.signal_info
         segments = list(self.session.segments)
         session_file = self.session_file
-        output_dir = self.output_dir
+        sessions_dir = self.sessions_dir
 
         await self.stop_ffmpeg()
 
@@ -478,7 +479,7 @@ class AppContext:
 
         for i, (start, end) in enumerate(segments):
             self._finalize_progress["recording"] = i + 1
-            output = make_output_path(output_dir, w, h, fps, interlaced, prefix="recording")
+            output = make_recording_path(session_file, i + 1, start)
             print(f"[monitor] extracting {i+1}/{total}: "
                   f"{start:.1f}s – {end:.1f}s ({end-start:.1f}s) → {output.name}")
 
@@ -537,18 +538,8 @@ class AppContext:
                 chunk = await self.proc.stdout.read(65536)
                 if not chunk:
                     break
-                await self.broadcaster.feed(chunk)
-        except asyncio.CancelledError:
-            pass
-
-    async def _drain_stdout(self) -> None:
-        if not self.proc or not self.proc.stdout:
-            return
-        try:
-            while True:
-                chunk = await self.proc.stdout.read(65536)
-                if not chunk:
-                    break
+                if not self._stopping_ffmpeg:
+                    await self.broadcaster.feed(chunk)
         except asyncio.CancelledError:
             pass
 
@@ -556,17 +547,30 @@ class AppContext:
         assert self.proc and self.proc.stderr
         try:
             while True:
-                line = await self.proc.stderr.readline()
+                try:
+                    line = await self.proc.stderr.readline()
+                except asyncio.LimitOverrunError:
+                    # ffmpeg progress updates use \r (not \n); they accumulate in
+                    # the 64 KB StreamReader buffer and overflow it on long captures.
+                    # Drain in chunks until we find \n or EOF, then resume readline().
+                    while True:
+                        chunk = await self.proc.stderr.read(65536)
+                        if not chunk:
+                            return  # EOF while draining
+                        if b'\n' in chunk:
+                            break
+                    continue
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    print(f"[ffmpeg] {text}")
-                    if self.session:
-                        for pat in _WARN_PATTERNS:
-                            if pat.search(text):
-                                self.session.add_warning(text)
-                                break
+                if not text:
+                    continue
+                print(f"[ffmpeg] {text}")
+                if self.session:
+                    for pat in _WARN_PATTERNS:
+                        if pat.search(text):
+                            self.session.add_warning(text)
+                            break
         except asyncio.CancelledError:
             pass
 
@@ -603,7 +607,7 @@ class AppContext:
                     )
                 if not disk_warned and self.session:
                     try:
-                        usage = shutil.disk_usage(self.output_dir)
+                        usage = shutil.disk_usage(self.sessions_dir)
                         hours_remaining = usage.free / _HEVC_BYTES_PER_HOUR
                         if hours_remaining < 4.0:
                             disk_warned = True
@@ -665,9 +669,9 @@ class StreamBroadcaster:
         if self._init_segment is None:
             self._init_segment = data
         dead: list[ServerConnection] = []
-        for client in self._clients:
+        for client in list(self._clients):
             try:
-                await client.send(data)
+                await asyncio.wait_for(client.send(data), timeout=2.0)
             except Exception:
                 dead.append(client)
         for c in dead:
@@ -777,11 +781,6 @@ class HTTPServer:
             elif clean == "/view":
                 await self._serve_file(writer, WEB_DIR / "view.html")
 
-            elif clean == "/api/config" and method == "GET":
-                await self._respond(writer, 200, json.dumps({
-                    "transfer_dest": str(ctx.transfer_dest) if ctx.transfer_dest else None,
-                }).encode())
-
             elif clean.startswith("/api/recording/") and clean.endswith("/transfer"):
                 name = clean.removeprefix("/api/recording/").removesuffix("/transfer")
                 if not _NAME_RE.match(name):
@@ -790,12 +789,12 @@ class HTTPServer:
                     state = ctx._transfers.get(name, {"state": "idle"})
                     await self._respond(writer, 200, json.dumps(state).encode())
                 elif method == "POST":
-                    if not ctx.transfer_dest:
-                        await self._respond(writer, 412, b'{"error":"no transfer_dest configured"}')
+                    if not ctx.storage_dir.exists():
+                        await self._respond(writer, 412, b'{"error":"storage/ not found: create the directory or symlink it to your storage target"}')
                     elif ctx._transfers.get(name, {}).get("state") == "running":
                         await self._respond(writer, 409, b'{"error":"transfer already running"}')
                     else:
-                        output = ctx.output_dir / name
+                        output = ctx.sessions_dir / name
                         if not output.exists():
                             await self._respond(writer, 404, b'{"error":"file not found"}')
                         else:
@@ -882,7 +881,7 @@ class HTTPServer:
         if not _NAME_RE.fullmatch(name):
             await self._respond(writer, 403, b"Forbidden", "text/plain")
             return
-        path = self.ctx.output_dir / name
+        path = self.ctx.sessions_dir / name
         if not path.is_file():
             await self._respond(writer, 404, b"Not found", "text/plain")
             return
@@ -932,7 +931,7 @@ class HTTPServer:
         if not _NAME_RE.fullmatch(name):
             await self._respond(writer, 400, b'{"error":"invalid name"}')
             return
-        meta = self.ctx.output_dir / Path(name).with_suffix(".json").name
+        meta = self.ctx.sessions_dir / Path(name).with_suffix(".json").name
         if not meta.is_file():
             await self._respond(writer, 404, b'{"error":"not found"}')
             return
@@ -944,7 +943,7 @@ class HTTPServer:
         if not _SESSION_NAME_RE.fullmatch(name):
             await self._respond(writer, 400, b'{"error":"invalid name"}')
             return
-        mp4 = self.ctx.output_dir / name
+        mp4 = self.ctx.sessions_dir / name
         if not mp4.exists():
             await self._respond(writer, 404, b'{"error":"not found"}')
             return
@@ -960,7 +959,7 @@ class HTTPServer:
     async def _handle_delete_all_sessions(self, writer: asyncio.StreamWriter) -> None:
         deleted: list[str] = []
         freed = 0
-        for mp4 in list(self.ctx.output_dir.glob("session_*.mp4")):
+        for mp4 in [p for p in self.ctx.sessions_dir.glob("*.mp4") if _SESSION_NAME_RE.fullmatch(p.name)]:
             try:
                 freed += mp4.stat().st_size
             except OSError:
@@ -979,7 +978,7 @@ class HTTPServer:
         if not _RECORDING_NAME_RE.fullmatch(name):
             await self._respond(writer, 400, b'{"error":"invalid name"}')
             return
-        path = self.ctx.output_dir / name
+        path = self.ctx.sessions_dir / name
         if not path.exists():
             await self._respond(writer, 404, b'{"error":"not found"}')
             return
@@ -992,7 +991,7 @@ class HTTPServer:
     async def _handle_delete_all_recordings(self, writer: asyncio.StreamWriter) -> None:
         deleted: list[str] = []
         freed = 0
-        for p in list(self.ctx.output_dir.glob("recording_*.mp4")):
+        for p in [p for p in self.ctx.sessions_dir.glob("*.mp4") if _RECORDING_NAME_RE.fullmatch(p.name)]:
             try:
                 freed += p.stat().st_size
             except OSError:
@@ -1059,10 +1058,10 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 # ---------------------------------------------------------------------------
 
 async def async_main(
-    output_dir: Path, port: int, transfer_dest: Path | None = None, synthetic: bool = False,
+    sessions_dir: Path, port: int, storage_dir: Path | None = None, synthetic: bool = False,
 ) -> int:
     ws_port = port + WS_PORT_OFFSET
-    ctx = AppContext(output_dir, transfer_dest=transfer_dest, synthetic=synthetic)
+    ctx = AppContext(sessions_dir, storage_dir=storage_dir, synthetic=synthetic)
 
     async def ws_handler(websocket: ServerConnection) -> None:
         ctx.broadcaster.add_client(websocket)
@@ -1139,17 +1138,17 @@ def main() -> int:
         description="Monitored HDMI capture with browser preview and record control."
     )
     parser.add_argument(
-        "-o", "--output-dir", type=Path, default=None,
+        "-o", "--sessions-dir", type=Path, default=None,
         help=f"Scratch directory for sessions and recordings "
-             f"(default: {_DEFAULT_OUTPUT_DIR}).",
+             f"(default: {_DEFAULT_SESSIONS_DIR}).",
     )
     parser.add_argument(
         "-p", "--port", type=int, default=DEFAULT_PORT,
         help=f"HTTP server port (default: {DEFAULT_PORT}).",
     )
     parser.add_argument(
-        "--transfer-dest", type=Path, default=None, metavar="DIR",
-        help="Override transfer destination (default: from config.toml or ~/Downloads).",
+        "--storage-dir", type=Path, default=None, metavar="DIR",
+        help=f"Override storage destination for transfers (default: {_DEFAULT_STORAGE_DIR}).",
     )
     parser.add_argument(
         "--synthetic", action="store_true",
@@ -1157,20 +1156,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config = _load_config()
-    output_dir = args.output_dir or _DEFAULT_OUTPUT_DIR
-    transfer_dest = (
-        args.transfer_dest
-        or (Path(config["transfer_dest"]) if "transfer_dest" in config else None)
-        or _DEFAULT_TRANSFER_DEST
-    )
+    sessions_dir = args.sessions_dir or _DEFAULT_SESSIONS_DIR
+    storage_dir = args.storage_dir or _DEFAULT_STORAGE_DIR
 
-    print(f"[monitor] output dir:    {output_dir}")
-    print(f"[monitor] transfer dest: {transfer_dest}")
-    if config:
-        print(f"[monitor] config:        {CONFIG_PATH}")
+    print(f"[monitor] sessions dir:  {sessions_dir}")
+    print(f"[monitor] storage dir:   {storage_dir}")
 
-    return asyncio.run(async_main(output_dir, args.port, transfer_dest, synthetic=args.synthetic))
+    return asyncio.run(async_main(sessions_dir, args.port, storage_dir, synthetic=args.synthetic))
 
 
 if __name__ == "__main__":

@@ -330,6 +330,27 @@ browser-based preview and record in/out control.
   pass, producing a file with no moov. Fix: `capture.py` ignores SIGINT
   (lets ffmpeg handle it); `monitor.py` tracks which signal was received and
   only forwards SIGTERM.
+- **stop_ffmpeg stdout drain race.** The original `stop_ffmpeg` cancelled
+  `_pipe_task`, awaited it, *then* created a `drain_task` for stdout, then
+  sent SIGINT. The window between pipe_task cancel and drain_task start allowed
+  ffmpeg's stdout pipe to fill up, potentially blocking SIGINT handling. A
+  stalled WebSocket client could also block `broadcaster.feed()`, holding
+  `_pipe_task` indefinitely and preventing SIGINT from ever being sent. Fix:
+  set `_stopping_ffmpeg = True` first (makes `_read_pipe` drain without
+  broadcasting — no gap), send SIGINT immediately, cancel `_pipe_task` only
+  after `proc.wait()` completes. `broadcaster.feed()` also gains a 2 s per-
+  client send timeout to bound how long a stalled client can block the loop.
+- **`_log_stderr` LimitOverrunError on long captures.** ffmpeg writes progress
+  updates to stderr using `\r` (carriage return) to overwrite the same terminal
+  line. asyncio's `readline()` waits for `\n` (line feed), so all the `\r`-
+  terminated progress updates accumulate in the 64 KB StreamReader buffer. After
+  ~10 minutes of capture (~640 updates × ~100 bytes), the buffer overflows and
+  `readline()` raises `LimitOverrunError`. `_log_stderr` only caught
+  `CancelledError`, so the task died. With nobody reading stderr, the stderr
+  pipe filled and ffmpeg blocked writing its next progress update — unable to
+  process SIGINT and unable to exit. Fix: catch `LimitOverrunError` inside
+  `_log_stderr`, drain stderr in 64 KB chunks until a `\n` or EOF is found,
+  then resume `readline()` for real log lines.
 - **fMP4 fragment latency:** `frag_keyframe` with a 2-second GOP produces
   ~3s preview latency (one GOP buffered before first fragment emits, plus
   network/decode). Acceptable for monitoring. Could be reduced by shortening
@@ -410,7 +431,7 @@ propagating `CancelledError` to its finally block where `abort()` (4) fires.
 ### Transfer workflow: manual, view-page-triggered
 
 Transfer is not automatic after extraction. The user proofs the recording on
-the `/view` page first, then clicks **Transfer** to copy it to `transfer_dest`.
+the `/view` page first, then clicks **Transfer** to copy it to `storage_dir`.
 
 **Why manual:** auto-transfer after extraction would send files the user hasn't
 reviewed yet, and gives no opportunity to skip a bad take. The view page is the
@@ -430,6 +451,12 @@ succeeds but the destination is later unavailable.
 The server polls `dest.stat().st_size` every 500 ms during the rsync subprocess
 to compute pct and instantaneous MB/s. On completion, size, elapsed, and avg
 bandwidth are recorded and displayed permanently on the view page.
+
+**Storage configuration:** no config file. The transfer destination is
+`<repo>/storage/` by default — create that directory or symlink it to any target
+(e.g. `ln -s /mnt/nas storage`). Override at runtime with `--storage-dir DIR`.
+If `storage/` does not exist when Transfer is clicked, the API returns a 412 with
+a clear setup message. The old `config.toml` mechanism has been removed.
 
 ### Lifecycle management: Makefile + systemd service
 
@@ -521,11 +548,11 @@ flat key/value table. Reasoning:
 Phase 2 deliverables (in addition to Phase 1):
 - `scripts/monitor.py`: continuous HEVC capture with dual-output (session file +
   fMP4 pipe), browser preview via WebSocket+MSE, mark-in/out record control,
-  segment extraction on complete. 135 tests passing.
+  recording extraction on complete. 125 tests passing.
 - `scripts/web/index.html`: capture UI — live HEVC preview, record button,
   session/recording file management with disk usage bar.
 - `scripts/web/view.html`: recording viewer — playback, metadata table, manual
-  transfer to `transfer_dest` with live progress and completion stats.
+  transfer to `storage_dir` with live progress and completion stats.
 - `Makefile`: lifecycle management — `make install` (udev + venv + systemd service
   on :80), `make run` (dev mode on :8090), `make restart`, `make clean`,
   `make status`.

@@ -46,7 +46,7 @@ def main() -> int:
 
     # ---- output path ----
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    output = make_output_path(args.output_dir, width, height, fps, interlaced)
+    output = make_output_path(args.output_dir)
 
     # ---- build command ----
     cmd = build_capture_cmd(width, height, fps, interlaced, output, args.duration)
