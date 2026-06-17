@@ -24,6 +24,9 @@ AUDIO_DEVICE = "hw:CARD=HDMI,DEV=0"
 
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads"
 
+# Synthetic mode: lavfi sources + software encoding for tests (no hardware/NVENC)
+SYNTHETIC_SIGNAL: tuple[int, int, float, bool] = (320, 240, 30.0, False)
+
 
 # ---------------------------------------------------------------------------
 # Signal probe
@@ -122,8 +125,33 @@ def build_input_args(
     return cmd
 
 
+def build_lavfi_input_args(
+    width: int, height: int, fps: float, duration: float = 3600.0,
+) -> list[str]:
+    """Build ffmpeg lavfi input args: synthetic video + sine audio (no hardware)."""
+    fps_str = fps_to_ffmpeg(fps)
+    d = round(duration)
+    return [
+        "-f", "lavfi", "-i", f"testsrc2=s={width}x{height}:r={fps_str}:d={d}",
+        "-f", "lavfi", "-i", f"sine=f=440:r=48000:d={d}",
+    ]
+
+
+def _software_video_encode_args(fps: float) -> list[str]:
+    gop = round(fps)
+    return ["-c:v", "libx264", "-preset", "ultrafast", "-g", str(gop)]
+
+
+def build_software_encode_args(fps: float) -> list[str]:
+    """Build encode args for synthetic mode: libx264 + AAC (no NVENC required)."""
+    cmd = _software_video_encode_args(fps)
+    cmd += ["-c:a", "aac", "-b:a", "64k", "-af", "aresample=async=1000"]
+    cmd += ["-map", "0:v", "-map", "1:a"]
+    return cmd
+
+
 def _video_encode_args(fps: float) -> list[str]:
-    gop = round(fps * 2)
+    gop = round(fps)  # 1-second keyframe interval; limits stream-copy extraction offset to ≤1 s
     return [
         "-c:v", "hevc_nvenc",
         "-preset", "p6",
@@ -182,6 +210,7 @@ def build_monitor_cmd(
     pipe_fd: int | str = "pipe:1",
     video_device: str = VIDEO_DEVICE,
     audio_device: str = AUDIO_DEVICE,
+    synthetic: bool = False,
 ) -> list[str]:
     """Build ffmpeg argv for continuous capture with dual output.
 
@@ -191,11 +220,15 @@ def build_monitor_cmd(
       2. Fragmented MP4 to pipe for WebSocket+MSE preview
 
     Uses two NVENC sessions (T400 supports 3 concurrent).
+    Pass synthetic=True to use lavfi sources + libx264 (no hardware/NVENC).
     """
     cmd: list[str] = ["ffmpeg", "-hide_banner"]
-    cmd += build_input_args(width, height, fps, video_device, audio_device)
+    if synthetic:
+        cmd += build_lavfi_input_args(width, height, fps)
+    else:
+        cmd += build_input_args(width, height, fps, video_device, audio_device)
 
-    encode = build_encode_args(fps)
+    encode = build_software_encode_args(fps) if synthetic else build_encode_args(fps)
     cmd += encode
     cmd += [str(output)]
     cmd += encode
@@ -215,22 +248,32 @@ def build_extract_cmd(
 ) -> list[str]:
     """Build ffmpeg argv for stream-copy extraction of a segment.
 
-    -ss and -to are output options (after -i) so both audio and video are cut
-    from the same position.  Input-mode seeking (-ss before -i) jumps to the
-    nearest video keyframe which can be up to one GOP (2 s) before start; audio
-    seeks independently and lands at start exactly, producing up to 2 s of
-    silence at the head of the recording.  Output-mode seeking is slower but
-    eliminates the stream-alignment problem.
+    -ss is placed BEFORE -i (input-mode seeking).  For a muxed MP4, ffmpeg
+    seeks the whole file to the keyframe at or before start; both audio and
+    video depart from that same keyframe → perfect A/V sync.  The clip has a
+    brief pre-roll (≤ one GOP, ≤ 1 s) before the mark-in point.
+
+    Output-mode seeking (-ss after -i) was tested and rejected: it starts audio
+    at the exact mark-in but video at the first keyframe AT OR AFTER mark-in
+    (up to 1 s later with a 1-s GOP), producing a persistent audio-ahead-of-
+    video offset for the full clip duration.
+
+    `-avoid_negative_ts make_zero` shifts all timestamps so the earliest
+    packet lands at PTS=0. Without it, input-mode seeking produces a file
+    with large absolute PTSes (~30 s) whose edit list modern browsers honour
+    but VLC / QuickTime on macOS sometimes misapply, producing a small but
+    visible sync offset only outside the browser.
 
     A small pad (0.15 s) is added to the end to avoid dropping the last audio
     packet when the cut falls on a packet boundary.
     """
     return [
         "ffmpeg", "-hide_banner",
-        "-i", str(source),
         "-ss", f"{start:.3f}",
+        "-i", str(source),
         "-to", f"{end + 0.15:.3f}",
         "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart",
         str(output),
     ]

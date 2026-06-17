@@ -34,4 +34,4 @@ jobs:
         run: uv sync
 
       - name: Run tests
-        run: uv run pytest -m "not virtual_device and not device" -v
+        run: uv run pytest -m "not device" -v

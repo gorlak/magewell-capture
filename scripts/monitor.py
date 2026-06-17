@@ -27,6 +27,7 @@ import signal
 import socket
 import sys
 import time
+import tomllib
 from datetime import datetime, timedelta
 from enum import Enum
 from http import HTTPStatus
@@ -35,7 +36,7 @@ from pathlib import Path
 from websockets.asyncio.server import serve, ServerConnection
 
 from capture_shared import (
-    DEFAULT_OUTPUT_DIR,
+    SYNTHETIC_SIGNAL,
     build_extract_cmd,
     build_monitor_cmd,
     make_output_path,
@@ -60,6 +61,22 @@ _RECORDING_NAME_RE = re.compile(r"recording_[\w.]+\.mp4")
 
 # HEVC Main10 CQ21 @1080p60 ≈ 20 Mbps ≈ 10 GB/hr (measured; see DECISIONS.md)
 _HEVC_BYTES_PER_HOUR = 10 * 1_000_000_000
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = _REPO_ROOT / "config.toml"
+_DEFAULT_OUTPUT_DIR = _REPO_ROOT / "sessions"
+_DEFAULT_TRANSFER_DEST = Path.home() / "Downloads"
+
+
+def _load_config(path: Path = CONFIG_PATH) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except Exception as exc:
+        print(f"[monitor] warning: could not read {path}: {exc}", file=sys.stderr)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +172,12 @@ class SessionState:
 class AppContext:
     """Shared state for the entire server lifetime."""
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(
+        self, output_dir: Path, transfer_dest: Path | None = None, synthetic: bool = False,
+    ) -> None:
         self.output_dir = output_dir
+        self.transfer_dest = transfer_dest
+        self.synthetic = synthetic
         self.app_state = AppState.INDEX
         self.broadcaster = StreamBroadcaster()
         # set during CAPTURING
@@ -260,11 +281,46 @@ class AppContext:
         }
         _atomic_write_json(output.with_suffix(".json"), meta)
 
+    async def _transfer_recording(self, output: Path, extraction: dict) -> None:
+        """Copy a finished recording to transfer_dest, then remove the local copy.
+
+        Uses cp(1) as a subprocess so the blocking I/O doesn't stall the event
+        loop. Times out after 300 s; on any failure the local file is kept and
+        transfer_error is recorded in the extraction dict.
+        """
+        assert self.transfer_dest
+        dest = self.transfer_dest / output.name
+        size_mb = output.stat().st_size / (1024 * 1024)
+        print(f"  → transferring {size_mb:.1f} MB to {dest} …")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "cp", "--preserve=timestamps", str(output), str(dest),
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                raise RuntimeError("transfer timed out after 300 s")
+            if proc.returncode != 0:
+                err = (stderr_bytes or b"").decode(errors="replace").strip()
+                raise RuntimeError(f"cp exited {proc.returncode}: {err}")
+            output.unlink()
+            extraction["transferred"] = str(dest)
+            print(f"  → transferred OK → {dest.name}")
+        except Exception as exc:
+            extraction["transfer_error"] = str(exc)
+            print(f"  → transfer failed: {exc}", file=sys.stderr)
+
     # ---- capture lifecycle ----
 
     async def start_ffmpeg(self) -> None:
         """Probe signal, start ffmpeg, initialise session, → CAPTURING."""
-        width, height, fps, interlaced = probe_signal()
+        if self.synthetic:
+            width, height, fps, interlaced = SYNTHETIC_SIGNAL
+        else:
+            width, height, fps, interlaced = probe_signal()
         self.signal_info = (width, height, fps, interlaced)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -275,7 +331,7 @@ class AppContext:
         self.meta_path = session_file.with_suffix(".json")
         self.started_at = datetime.now()
 
-        cmd = build_monitor_cmd(width, height, fps, interlaced, session_file)
+        cmd = build_monitor_cmd(width, height, fps, interlaced, session_file, synthetic=self.synthetic)
         print(f"\n[monitor] session file: {session_file}")
         print(f"[monitor] cmd: {' '.join(cmd)}\n")
 
@@ -401,6 +457,7 @@ class AppContext:
                     self._write_recording_meta(output, start, end)
                 except Exception:
                     pass
+                await self._transfer_recording(output, extractions[i])
             else:
                 print(f"  → extraction failed (rc={proc.returncode})", file=sys.stderr)
                 if stderr_bytes:
@@ -932,9 +989,11 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-async def async_main(output_dir: Path, port: int) -> int:
+async def async_main(
+    output_dir: Path, port: int, transfer_dest: Path | None = None, synthetic: bool = False,
+) -> int:
     ws_port = port + WS_PORT_OFFSET
-    ctx = AppContext(output_dir)
+    ctx = AppContext(output_dir, transfer_dest=transfer_dest, synthetic=synthetic)
 
     async def ws_handler(websocket: ServerConnection) -> None:
         ctx.broadcaster.add_client(websocket)
@@ -1011,15 +1070,38 @@ def main() -> int:
         description="Monitored HDMI capture with browser preview and record control."
     )
     parser.add_argument(
-        "-o", "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
-        help=f"Directory for output files (default: {DEFAULT_OUTPUT_DIR}).",
+        "-o", "--output-dir", type=Path, default=None,
+        help=f"Scratch directory for sessions and recordings "
+             f"(default: {_DEFAULT_OUTPUT_DIR}).",
     )
     parser.add_argument(
         "-p", "--port", type=int, default=DEFAULT_PORT,
         help=f"HTTP server port (default: {DEFAULT_PORT}).",
     )
+    parser.add_argument(
+        "--transfer-dest", type=Path, default=None, metavar="DIR",
+        help="Override transfer destination (default: from config.toml or ~/Downloads).",
+    )
+    parser.add_argument(
+        "--synthetic", action="store_true",
+        help="Use lavfi sources + libx264 instead of real hardware (testing only).",
+    )
     args = parser.parse_args()
-    return asyncio.run(async_main(args.output_dir, args.port))
+
+    config = _load_config()
+    output_dir = args.output_dir or _DEFAULT_OUTPUT_DIR
+    transfer_dest = (
+        args.transfer_dest
+        or (Path(config["transfer_dest"]) if "transfer_dest" in config else None)
+        or _DEFAULT_TRANSFER_DEST
+    )
+
+    print(f"[monitor] output dir:    {output_dir}")
+    print(f"[monitor] transfer dest: {transfer_dest}")
+    if config:
+        print(f"[monitor] config:        {CONFIG_PATH}")
+
+    return asyncio.run(async_main(output_dir, args.port, transfer_dest, synthetic=args.synthetic))
 
 
 if __name__ == "__main__":

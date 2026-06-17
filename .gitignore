@@ -17,3 +17,9 @@ __pycache__/
 
 # build scratch
 **/linkstubs/
+
+# local runtime data (gitignored — recreated at runtime)
+sessions/
+
+# local config (contains private paths; copy config.toml.TEMPLATE to get started)
+config.toml

@@ -16,6 +16,9 @@ scripts/               capture scripts (run via the venv)
   monitor.py           monitored capture with browser preview and record control
   capture_shared.py    shared signal probe + ffmpeg command builders
   web/index.html       browser UI served by monitor.py
+sessions/              runtime scratch space — session and recording files (gitignored)
+config.toml            local config (gitignored; see config.toml.TEMPLATE to get started)
+config.toml.TEMPLATE   self-documented config template — copy to config.toml and edit
 setup.sh               one-time privileged setup (udev rule) — undo: teardown.sh
 DECISIONS.md           design record
 ATTRIBUTIONS.md        third-party / consulted-project credits
@@ -69,6 +72,31 @@ uv run pytest
 
 # (optional) expose on PATH:  ln -s "$PWD/scripts/capture.py" ~/.local/bin/capture
 ```
+
+## Configuration
+
+`monitor.py` reads an optional `config.toml` in the repo root (gitignored).
+Copy the template to get started:
+
+```bash
+cp config.toml.TEMPLATE config.toml
+# edit config.toml — set transfer_dest to your desired destination
+```
+
+Currently the only supported key is:
+
+| Key | Description |
+|-----|-------------|
+| `transfer_dest` | Absolute path to copy each finished recording to after extraction. The local copy in `sessions/` is removed on success. Defaults to `~/Downloads` if absent. |
+
+Example:
+
+```toml
+transfer_dest = "/mnt/jarvis-incoming"
+```
+
+`sessions/` (the scratch directory for raw session captures and pre-transfer
+recordings) is also gitignored. It is created automatically on first run.
 
 ## How it works
 

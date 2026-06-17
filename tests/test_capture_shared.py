@@ -104,10 +104,10 @@ class TestBuildCaptureCmd:
         idx = cmd.index("-framerate")
         assert cmd[idx + 1] == "60000/1001"
 
-    def test_gop_is_two_seconds(self):
+    def test_gop_is_one_second(self):
         cmd = self._build(fps=59.94)
         idx = cmd.index("-g")
-        assert cmd[idx + 1] == "120"
+        assert cmd[idx + 1] == "60"
 
     def test_output_is_last(self):
         cmd = self._build()
@@ -191,18 +191,20 @@ class TestBuildExtractCmd:
         idx_to = cmd.index("-to")
         assert cmd[idx_to + 1] == "25.150"
 
-    def test_seek_is_output_mode(self):
-        # -ss and -to must come AFTER -i so both streams are cut from the same
-        # position; input-mode seeking anchors video at the keyframe but audio
-        # at the exact timestamp, producing silence up to one GOP long.
+    def test_seek_is_input_mode(self):
+        # -ss must come BEFORE -i (input-mode seek): ffmpeg seeks the whole
+        # muxed file to the keyframe before start, so both audio and video
+        # depart from the same point and play in sync (brief pre-roll ≤ 1 GOP).
+        # Output-mode (-ss after -i) starts audio at mark-in but video at the
+        # next keyframe after it, producing a persistent audio-ahead offset.
         cmd = build_extract_cmd(
             Path("/tmp/session.mp4"), 10.5, 25.0, Path("/tmp/out.mp4")
         )
         idx_i  = cmd.index("-i")
         idx_ss = cmd.index("-ss")
         idx_to = cmd.index("-to")
-        assert idx_ss > idx_i, "-ss must be after -i (output-mode seek)"
-        assert idx_to > idx_i, "-to must be after -i (output-mode seek)"
+        assert idx_ss < idx_i, "-ss must be before -i (input-mode seek)"
+        assert idx_to > idx_i, "-to must be after -i"
 
     def test_uses_stream_copy(self):
         cmd = build_extract_cmd(
@@ -223,6 +225,25 @@ class TestBuildExtractCmd:
             Path("/tmp/session.mp4"), 0, 5, Path("/tmp/out.mp4")
         )
         assert "+faststart" in cmd
+
+    def test_no_reset_timestamps(self):
+        # -reset_timestamps 1 resets each stream independently to PTS=0,
+        # causing a sustained audio-ahead-of-video offset equal to the keyframe
+        # gap. avoid_negative_ts normalises cleanly instead.
+        cmd = build_extract_cmd(
+            Path("/tmp/session.mp4"), 0, 5, Path("/tmp/out.mp4")
+        )
+        assert "-reset_timestamps" not in cmd
+
+    def test_avoid_negative_ts(self):
+        # Shifts timestamps to start at 0 so large absolute PTSes don't trip
+        # up VLC / QuickTime edit list handling.
+        cmd = build_extract_cmd(
+            Path("/tmp/session.mp4"), 10.5, 25.0, Path("/tmp/out.mp4")
+        )
+        assert "-avoid_negative_ts" in cmd
+        idx = cmd.index("-avoid_negative_ts")
+        assert cmd[idx + 1] == "make_zero"
 
 
 # ---------------------------------------------------------------------------

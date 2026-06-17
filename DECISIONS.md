@@ -355,23 +355,31 @@ testing and diagnostics (e.g. `capture.py --duration 5`).
 Both share `capture_shared.py` (ffmpeg command builders, signal probe, path
 generation).
 
-### Extraction seeking: output-mode only
+### Extraction seeking: input-mode
 
-`build_extract_cmd` places `-ss` and `-to` **after** `-i` (output-mode
-seeking), not before it (input-mode seeking). This is not the default ffmpeg
-recommendation for stream-copy (input-mode is faster), but it is necessary here:
+`build_extract_cmd` places `-ss` **before** `-i` (input-mode seeking).
 
-- Input-mode seeking jumps to the nearest video keyframe, which can be up to
-  one GOP (2 s) before the requested start time.
-- Audio seeking in input mode is independent and lands at the exact timestamp.
-- Result: video starts at the keyframe; audio starts 0–2 s later. The first
-  recording has 0–2 s of silence at the head.
+For a muxed MP4, input-mode seeking finds the keyframe at or before the target
+time and seeks the **entire file** to that position. Both audio and video
+depart from the same keyframe → perfect A/V sync. The clip has a brief
+pre-roll (≤ one GOP, ≤ 1 s) before the exact mark-in point.
 
-Output-mode seeking is slower (ffmpeg must decode and discard frames up to the
-start point) but both streams are cut at exactly the same position. Since these
-are stream-copy extractions from a file (not live), the speed difference is
-negligible. The 0.15 s end pad (`end + 0.15`) avoids dropping the last audio
-packet when the cut falls on a packet boundary.
+**Output-mode was tried and rejected:** placing `-ss` after `-i` causes ffmpeg
+to start audio at the exact mark-in time but video at the first keyframe AT OR
+AFTER mark-in (up to one GOP later). This produces a persistent audio-ahead-
+of-video offset equal to the keyframe gap for the full clip duration — the
+opposite of what was originally assumed (we incorrectly believed input-mode
+made audio late; it does not — it seeks both streams together).
+
+**`-reset_timestamps 1` was tried and rejected:** it resets each stream
+**independently** to PTS=0, causing a sustained A/V offset equal to the gap
+between audio and video start PTSes (up to one GOP). Removed.
+
+**GOP size:** `round(fps)` (1 s at 60 fps) bounds the pre-roll window. The
+original 2-second GOP (`round(fps * 2)`) doubled it unnecessarily.
+
+The 0.15 s end pad (`end + 0.15`) avoids dropping the last audio packet when
+the cut falls on a packet boundary.
 
 ### Shutdown: HTTP CLOSE-WAIT hang
 

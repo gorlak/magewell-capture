@@ -1,0 +1,13 @@
+# magewell-capture local config
+#
+# Copy this file to config.toml (in the same directory) and fill in your values.
+# config.toml is gitignored — it is the right place for paths that are private
+# to your machine (e.g. NAS mount points).
+#
+# If config.toml is absent, recordings are copied to ~/Downloads after extraction.
+
+# Where to copy finished recordings after each clip is extracted.
+# The original in sessions/ is removed once the copy succeeds.
+# Must be an absolute path to an existing, writable directory.
+
+transfer_dest = "/tmp"

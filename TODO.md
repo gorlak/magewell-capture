@@ -2,10 +2,10 @@
 
 ## P3 — Disk space, file management, and output configuration
 
-### Configuration
-Output directory goes in a config file (format TBD — likely
-`~/.config/magewell-capture/config.toml`). CLI `--output-dir` flag already
-exists and takes precedence.
+### Configuration ✅
+Repo-local `config.toml` (gitignored). Single key: `transfer_dest`.
+If absent, recordings copy to `~/Downloads`. Sessions scratch dir: `./sessions/`
+(gitignored). See `config.toml.TEMPLATE` to get started.
 
 ### INDEX page: disk status ✅
 Disk bar showing hours remaining (HEVC @20 Mbps) and free/total. Turns red
@@ -15,19 +15,20 @@ below 4 h. DELETE endpoints and UI already wired.
 Low-disk warning (< 4 h remaining) added to the stall-detector background
 task; surfaces as a warnings banner in the CAPTURING UI.
 
-### Network share transfer after extraction
-After each clip extracts, optionally move to a configured destination
-(NFS/SMB, assumed mounted). On success: local copy removed. On failure:
-local file kept, warning in meta. Config unset = skip transfer.
+### Network share transfer after extraction ✅
+`--transfer-dest DIR` flag. After each clip extracts, copies to DIR with
+`cp --preserve=timestamps` (300 s timeout). On success: local copy removed,
+`extraction["transferred"]` set in session meta. On failure: local file kept,
+`extraction["transfer_error"]` recorded. Omit flag to keep recordings local.
 
 
 ## P4 — Tests still wanted
 
-- Assert no orphaned ffmpeg process after clean shutdown
-- Assert ALSA device released after clean shutdown
+- Assert no orphaned ffmpeg process after clean shutdown ✅ (implicit via moov check — `test_virtual_device.py`)
+- Assert ALSA device released after clean shutdown (hardware-only; skip for now)
 - Stall detector ✅ (`tests/test_monitor.py`) — zero-byte settle, stall, low disk, growing file
-- Meta read/write/atomic-update unit tests (no hardware)
-- FINALIZING recovery: meta with pending extractions + stub MP4 → correct outputs
+- Meta read/write/atomic-update unit tests ✅ (`tests/test_meta.py`)
+- FINALIZING recovery: stub MP4 + extraction + transfer ✅ (`tests/test_meta.py`)
 - Unexpected ffmpeg exit ✅ (`tests/test_monitor.py`) — transitions to INDEX, meta written,
   warning recorded, background tasks cancelled
 
