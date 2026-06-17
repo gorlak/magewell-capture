@@ -19,7 +19,8 @@ jobs:
             g++ \
             libasound2t64 \
             libudev1 \
-            libv4l-0
+            libv4l-0 \
+            ffmpeg
 
       - name: Install uv
         run: pipx install uv
