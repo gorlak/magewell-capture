@@ -550,7 +550,7 @@
   }
 
   function connectWebSocket() {
-    var wsPort = parseInt(location.port || '8090') + 1;
+    var wsPort = (parseInt(location.port) || 80) + 1;
     ws = new WebSocket('ws://' + location.hostname + ':' + wsPort);
     ws.binaryType = 'arraybuffer';
 

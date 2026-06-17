@@ -19,7 +19,7 @@ scripts/               capture scripts (run via the venv)
 sessions/              runtime scratch space — session and recording files (gitignored)
 config.toml            local config (gitignored; see config.toml.TEMPLATE to get started)
 config.toml.TEMPLATE   self-documented config template — copy to config.toml and edit
-setup.sh               one-time privileged setup (udev rule) — undo: teardown.sh
+Makefile               lifecycle management (make install / run / restart / clean / status)
 DECISIONS.md           design record
 ATTRIBUTIONS.md        third-party / consulted-project credits
 ```
@@ -34,30 +34,18 @@ The Magewell SDK license notice lives with the vendored SDK it governs
 #    - pipx: isolated Python app installer, used here only to install uv
 #    - ffmpeg: encoding pipeline (NVENC, fMP4 output, segment extraction)
 #    - v4l-utils: optional but useful for inspecting V4L2 device capabilities
-sudo apt install -y pipx ffmpeg v4l-utils
+sudo apt install -y pipx ffmpeg rsync v4l-utils
 
 # 2. Install uv — the Python package/venv manager used by this project.
 #    (pipx installs it into an isolated env so it doesn't pollute the system.)
 pipx install uv
 
-# 3. One-time privileged setup: installs a udev rule so the capture user
-#    (group plugdev) can access the Magewell's device nodes (raw USB + HID).
-#    The SDK opens these read-write to read signal status; without the rule
-#    you get MWAccessError / EACCES. The script prints the exact rule before
-#    writing it. Root is needed only to write under /etc/udev and reload udev
-#    — no downloads, no network. (Undo any time with: sudo ./teardown.sh)
-sudo ./setup.sh
-
-# 4. Build the native Magewell library. The vendored SDK archive is committed
+# 3. Build the native Magewell library. The vendored SDK archive is committed
 #    to the repo; this script unpacks it and compiles libMWCapture.so into
 #    packages/magewell/src/magewell/_lib/ (gitignored — rebuild per box).
 packages/magewell/build_lib.sh
 
-# 5. Create the venv and install all Python dependencies (magewell package,
-#    websockets, pytest, etc.) as declared in pyproject.toml.
-uv sync
-
-# 6. Run the test suite. Layout tests always run; device tests require the
+# 4. Run the test suite. Layout tests always run; device tests require the
 #    Magewell to be plugged in and the udev rule to be active.
 uv run pytest
 
@@ -65,13 +53,34 @@ uv run pytest
 .venv/bin/python scripts/capture.py            # until Ctrl-C
 .venv/bin/python scripts/capture.py -d 60      # 60-second timed capture
 .venv/bin/python scripts/capture.py -o /tmp    # custom output directory
-
-# Monitored capture with browser preview and record control
-.venv/bin/python scripts/monitor.py            # serves on http://localhost:8090
-.venv/bin/python scripts/monitor.py -p 9090    # custom port
-
-# (optional) expose on PATH:  ln -s "$PWD/scripts/capture.py" ~/.local/bin/capture
 ```
+
+## Lifecycle
+
+`make` manages three states: **CLEAN** (bare checkout), **RUN** (hardware set up,
+running interactively), and **INSTALL** (running as a systemd service).
+
+```
+CLEAN ←──────────── make clean ────────────→ CLEAN
+  │                                             ↑
+make install / make run                      make clean
+  │                                             │
+  ↓                                             │
+RUN ←───── make run ───────────────────────────┤
+  │                                             │
+make install                                 make clean
+  │                                             │
+  ↓                                             │
+INSTALL ←── make restart ── INSTALL ───────────┘
+```
+
+| Command | What it does |
+|---|---|
+| `make` | Show current state (udev rules, venv, service status) |
+| `make install` | Install udev rules + venv + systemd service, then start. No-op if already running. |
+| `make run` | Installs udev rules if missing, stops service if running, launches interactively. |
+| `make restart` | Restart the running service (errors if not running). |
+| `make clean` | Stop + remove service and udev rules; delete generated files. |
 
 ## Configuration
 

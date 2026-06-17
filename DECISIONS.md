@@ -274,7 +274,7 @@ browser-based preview and record in/out control.
    rejected because it doesn't forward codec extradata (produces empty `hvcC`
    in the fMP4 init segment, which MSE rejects — see "Findings" below).
 
-2. **Python async server** (`websockets` library) on `:8090`, serving:
+2. **Python async server** (`websockets` library) on `:8090` (dev) / `:80` (service), serving:
    - WebSocket stream: fMP4 data from ffmpeg pipe → broadcast to browser clients
    - Static web UI (the monitor page)
    - JSON API for record control (`/api/mark-in?t=N`, `/api/mark-out?t=N`,
@@ -407,6 +407,47 @@ The full shutdown sequence requires all four pieces to work together:
 Items 3 and 4 are coupled: the sweep (3) cancels the stuck `_handle()` task,
 propagating `CancelledError` to its finally block where `abort()` (4) fires.
 
+### Transfer workflow: manual, view-page-triggered
+
+Transfer is not automatic after extraction. The user proofs the recording on
+the `/view` page first, then clicks **Transfer** to copy it to `transfer_dest`.
+
+**Why manual:** auto-transfer after extraction would send files the user hasn't
+reviewed yet, and gives no opportunity to skip a bad take. The view page is the
+natural proof step; transfer is the intentional archival act.
+
+**rsync over cp:** `rsync` performs block-level checksum verification during
+transfer (unlike `cp`). `--inplace` is required for CIFS/Samba mounts — rsync's
+default temp-file-then-rename fails with `EPERM` on those filesystems.
+`--archive` is deliberately not used: it tries to set permissions and ownership,
+which also fails on network mounts.
+
+**Local copy kept:** transfer never removes the source file. Cleanup is via the
+delete UI on the index page. This prevents accidental data loss if a transfer
+succeeds but the destination is later unavailable.
+
+**Progress:** the view page polls `GET /api/recording/<name>/transfer` at 500 ms.
+The server polls `dest.stat().st_size` every 500 ms during the rsync subprocess
+to compute pct and instantaneous MB/s. On completion, size, elapsed, and avg
+bandwidth are recorded and displayed permanently on the view page.
+
+### Lifecycle management: Makefile + systemd service
+
+`make install` writes two files as root and starts a systemd service:
+- `/etc/udev/rules.d/70-magewell.rules` — device node access
+- `/etc/systemd/system/magewell-capture.service` — unit file with `User=<you>`,
+  absolute paths baked in, `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port 80
+
+`make install` is a no-op if the service is already running — bouncing a live
+capture must be intentional (`make restart`). `make run` stops the service if
+running and launches interactively for dev iteration.
+
+Port 80 requires `CAP_NET_BIND_SERVICE`; only the service process gets it via
+`AmbientCapabilities`. Dev mode (`make run`) uses port 8090 and needs no
+capability. The WebSocket port is always HTTP_port + 1 (81 in service mode,
+8091 in dev). The browser computes this as `(parseInt(location.port) || 80) + 1`
+— `location.port` is empty string on port 80 (browsers omit default ports).
+
 ### Session lifecycle: no separate REPORT state
 
 The original design had a four-state cycle: INDEX → CAPTURING → FINALIZING →
@@ -433,7 +474,7 @@ flat key/value table. Reasoning:
   `MWOpenChannelByPath` fails (`EACCES`); with USB but **not** hidraw the channel
   opens but every SDK call returns `MW_FAILED`. Both are granted by
   `packages/magewell/udev/70-magewell.rules` (plugdev rw on idVendor 2935),
-  applied via `sudo ./setup.sh`. ffmpeg/V4L2 capture is unaffected
+  applied via `sudo ./system-setup.sh`. ffmpeg/V4L2 capture is unaffected
   (`/dev/videoN`, group `video`).
 - **SDK version must match the device's USB interface layout.** SDK 3.3.1.1313
   (from the ReproNim/reprostim mirror) failed with `USBDEVFS_CLAIMINTERFACE`
@@ -473,29 +514,23 @@ flat key/value table. Reasoning:
 - 60-second test: 3595 frames, 167.1 MB (~20 Mbps avg), steady 0.999x realtime,
   no xruns or errors. Projected ~10 GB/hour.
 
-## Current status (2026-05-21)
+## Current status (2026-06-17)
 
-**Phase 1 complete. Phase 2 designed, ready to implement.**
+**Phase 1 and Phase 2 complete.**
 
-Phase 1 deliverables:
-- `magewell` package: ctypes binding to MWCapture SDK 3.3.1.1515, exposing
-  `read_signal()` (video: res/fps/interlace/color/quant/sat/frame-type),
-  `read_channel_info()` (device: family/serial/firmware), and
-  `read_audio_signal()` (audio: sample-rate/bits/channels/LPCM). 19 tests
-  (layout + setup + device), all green.
-- `scripts/capture.py`: probes signal via the SDK (with 1920×1080@60 fallback),
-  builds an ffmpeg command matching the detected format, runs it to a
-  timestamped file in `~/Downloads`. HEVC Main10 NVENC. Handles SIGINT/SIGTERM
-  gracefully. Preserved as a simple one-shot tool for testing/diagnostics.
-- `setup.sh`/`teardown.sh`: one-time privileged setup (udev rule for USB + hidraw
-  access), supervised and reversible.
-- SDK vendored (3.3.1.1515, official Magewell download) with x64 + arm64 `.a`,
-  all headers, license notice, `SOURCE.txt` with SHA256, and `build_lib.sh` that
-  auto-detects the host architecture.
-- uv workspace, `.venv`, editable install, pytest wired.
-
-**Next:** implement Phase 2 (`scripts/monitor.py` — browser-based monitored
-capture with HLS preview and record in/out control).
+Phase 2 deliverables (in addition to Phase 1):
+- `scripts/monitor.py`: continuous HEVC capture with dual-output (session file +
+  fMP4 pipe), browser preview via WebSocket+MSE, mark-in/out record control,
+  segment extraction on complete. 135 tests passing.
+- `scripts/web/index.html`: capture UI — live HEVC preview, record button,
+  session/recording file management with disk usage bar.
+- `scripts/web/view.html`: recording viewer — playback, metadata table, manual
+  transfer to `transfer_dest` with live progress and completion stats.
+- `Makefile`: lifecycle management — `make install` (udev + venv + systemd service
+  on :80), `make run` (dev mode on :8090), `make restart`, `make clean`,
+  `make status`.
+- `SECURITY.md`: agentic authorship disclosure, privilege model, network surface,
+  architecture FAQ.
 
 ---
 

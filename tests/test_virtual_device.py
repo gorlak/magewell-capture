@@ -150,12 +150,9 @@ def test_synthetic_session_has_valid_moov(tmp_path):
 
 
 @pytest.mark.virtual_device
-def test_synthetic_record_extract_transfer(tmp_path):
-    """Full cycle: start → mark-in → mark-out → complete → verify extraction + transfer."""
-    dest = tmp_path / "transfer"
-    dest.mkdir()
-
-    proc = _start_synthetic(tmp_path, _PORT_CYCLE, ["--transfer-dest", str(dest)])
+def test_synthetic_record_extract(tmp_path):
+    """Full cycle: start → mark-in → mark-out → complete → verify extraction."""
+    proc = _start_synthetic(tmp_path, _PORT_CYCLE)
     try:
         assert _wait_for_http(_PORT_CYCLE), "server did not start"
         assert _http_post(_PORT_CYCLE, "/api/start") == 200
@@ -179,17 +176,11 @@ def test_synthetic_record_extract_transfer(tmp_path):
                 proc.kill()
                 proc.wait()
 
-    # Extraction went to transfer dest (local copy removed)
-    recordings = list(dest.glob("recording_*.mp4"))
-    assert len(recordings) == 1, f"expected 1 recording in {dest}, got {recordings}"
+    # Recording stays in output dir — transfer is now manual via /view page.
+    recordings = list(tmp_path.glob("recording_*.mp4"))
+    assert len(recordings) == 1, f"expected 1 recording in {tmp_path}, got {recordings}"
 
-    # Session meta records the transfer
     sessions = list(tmp_path.glob("session_*.json"))
     assert sessions
     meta = json.loads(sessions[0].read_text())
     assert meta["extractions"][0]["status"] == "done"
-    assert meta["extractions"][0]["transferred"] is not None
-
-    # Recording is gone from the scratch dir (transferred)
-    local_name = meta["extractions"][0]["output"]
-    assert not (tmp_path / local_name).exists()

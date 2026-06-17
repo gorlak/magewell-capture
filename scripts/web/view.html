@@ -18,11 +18,33 @@
   h1 { font-size: 14px; color: #666; font-weight: 400; margin-bottom: 24px; font-family: monospace; word-break: break-all; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #555; margin-bottom: 10px; }
   video { width: 100%; border-radius: 4px; background: #000; display: block; margin-bottom: 36px; }
-  #meta-section { margin-top: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   td { padding: 5px 0; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
   td.meta-key { font-family: monospace; color: #555; padding-right: 24px; white-space: nowrap; }
   td.meta-val { font-family: monospace; color: #ccc; word-break: break-all; }
+
+  /* ---- transfer ---- */
+  #transfer-section { margin-bottom: 36px; }
+  #transfer-row { display: flex; align-items: flex-start; gap: 16px; }
+  #transfer-btn {
+    flex-shrink: 0;
+    background: #1d4ed8; color: #fff; border: none; border-radius: 4px;
+    padding: 8px 20px; font-size: 14px; cursor: pointer; white-space: nowrap;
+  }
+  #transfer-btn:hover:not(:disabled) { background: #2563eb; }
+  #transfer-btn:disabled { background: #1e3a5f; color: #4a7ab5; cursor: default; }
+  #transfer-right {
+    flex: 1;
+    min-height: 56px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+  }
+  #transfer-bar-wrap { width: 100%; height: 4px; background: #1a1a1a; border-radius: 2px; overflow: hidden; }
+  #transfer-bar { height: 100%; background: #60a5fa; width: 0%; transition: width 0.4s linear; }
+  #transfer-stats { font-size: 12px; color: #ccc; min-height: 16px; }
+  #transfer-paths { font-size: 11px; color: #aaa; white-space: pre; word-break: break-all; min-height: 28px; line-height: 1.6; }
 </style>
 </head>
 <body>
@@ -30,6 +52,19 @@
 <a class="back" href="/">← Back to index</a>
 <h1 id="page-title"></h1>
 <video id="player" controls></video>
+
+<div id="transfer-section">
+  <h2>Transfer</h2>
+  <div id="transfer-row">
+    <button id="transfer-btn">Transfer</button>
+    <div id="transfer-right">
+      <div id="transfer-bar-wrap"><div id="transfer-bar"></div></div>
+      <div id="transfer-stats"></div>
+      <div id="transfer-paths"></div>
+    </div>
+  </div>
+</div>
+
 <div id="meta-section" style="display:none">
   <h2>Metadata</h2>
   <table><tbody id="meta-tbody"></tbody></table>
@@ -46,6 +81,14 @@
   document.getElementById('page-title').textContent = fileName;
   document.getElementById('player').src = '/files/' + encodeURIComponent(fileName);
 
+  var transferBtn   = document.getElementById('transfer-btn');
+  var transferBar   = document.getElementById('transfer-bar');
+  var transferStats = document.getElementById('transfer-stats');
+  var transferPaths = document.getElementById('transfer-paths');
+
+  var pollTimer = null;
+
+  // Load recording meta
   fetch('/api/meta/' + encodeURIComponent(fileName))
     .then(function(r) { return r.ok ? r.json() : null; })
     .catch(function() { return null; })
@@ -60,6 +103,87 @@
       document.getElementById('meta-tbody').innerHTML = rows;
       document.getElementById('meta-section').style.display = '';
     });
+
+  // Restore any existing transfer state on load
+  fetch('/api/recording/' + encodeURIComponent(fileName) + '/transfer')
+    .then(function(r) { return r.json(); })
+    .catch(function() { return {state: 'idle'}; })
+    .then(applyTransferState);
+
+  // Button click → POST to trigger transfer
+  transferBtn.addEventListener('click', function() {
+    fetch('/api/recording/' + encodeURIComponent(fileName) + '/transfer', {method: 'POST'})
+      .then(function(r) { return r.json(); })
+      .then(function(state) { applyTransferState(state); startPolling(); })
+      .catch(function(e) { showInfo('Request failed: ' + e, '#f87171'); });
+  });
+
+  function applyTransferState(state) {
+    if (state.state === 'running') {
+      transferBtn.disabled = true;
+      updateProgress(state);
+      startPolling();
+    } else if (state.state === 'done') {
+      showDone(state);
+    } else if (state.state === 'failed') {
+      transferBtn.disabled = false;
+      showInfo('⚠ ' + (state.error || 'unknown error'), '#f87171');
+    }
+    // idle: leave button in default state
+  }
+
+  function updateProgress(state) {
+    var pct = state.pct || 0;
+    var rate = state.rate_mbps || 0;
+    transferBar.style.width = pct + '%';
+    if (pct === 0 && rate === 0) {
+      transferStats.textContent = 'Starting…';
+    } else {
+      transferStats.textContent = pct + '%  ·  ' + rate.toFixed(1) + ' MB/s';
+    }
+    transferPaths.textContent = (state.source || '') + '\n→ ' + (state.destination || '');
+  }
+
+  function showDone(state) {
+    clearPolling();
+    transferBtn.disabled = true;
+    transferBar.style.width = '100%';
+    transferStats.textContent =
+      '✓ Done  ·  ' +
+      (state.size_mb || 0).toFixed(1) + ' MB  ·  ' +
+      (state.elapsed_s || 0).toFixed(1) + ' s  ·  avg ' +
+      (state.avg_mbps || 0).toFixed(1) + ' MB/s';
+    transferPaths.textContent = '→ ' + (state.destination || '');
+  }
+
+  function showInfo(msg, color) {
+    transferStats.style.color = color || '#555';
+    transferStats.textContent = msg;
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(function() {
+      fetch('/api/recording/' + encodeURIComponent(fileName) + '/transfer')
+        .then(function(r) { return r.json(); })
+        .then(function(state) {
+          if (state.state === 'running') {
+            updateProgress(state);
+          } else if (state.state === 'done') {
+            showDone(state);
+          } else if (state.state === 'failed') {
+            clearPolling();
+            transferBtn.disabled = false;
+            showInfo('⚠ ' + (state.error || 'unknown error'), '#f87171');
+          }
+        })
+        .catch(function() {});
+    }, 500);
+  }
+
+  function clearPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
 
   function flatten(val, prefix) {
     var out = {};

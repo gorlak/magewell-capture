@@ -195,6 +195,8 @@ class AppContext:
         # set during FINALIZING
         self.finalize_task: asyncio.Task | None = None
         self._finalize_progress: dict = {}
+        # per-recording transfer state (filename → state dict), persists in memory
+        self._transfers: dict[str, dict] = {}
 
     # ---- status ----
 
@@ -281,37 +283,76 @@ class AppContext:
         }
         _atomic_write_json(output.with_suffix(".json"), meta)
 
-    async def _transfer_recording(self, output: Path, extraction: dict) -> None:
-        """Copy a finished recording to transfer_dest, then remove the local copy.
+    async def _transfer_recording(self, output: Path) -> None:
+        """Transfer a recording to transfer_dest via rsync (user-triggered).
 
-        Uses cp(1) as a subprocess so the blocking I/O doesn't stall the event
-        loop. Times out after 300 s; on any failure the local file is kept and
-        transfer_error is recorded in the extraction dict.
+        Updates self._transfers[output.name] with live progress (pct, rate_mbps)
+        and on completion with summary stats (size_mb, elapsed_s, avg_mbps).
+        The local file is never removed here — cleanup is via the delete UI.
         """
         assert self.transfer_dest
         dest = self.transfer_dest / output.name
-        size_mb = output.stat().st_size / (1024 * 1024)
-        print(f"  → transferring {size_mb:.1f} MB to {dest} …")
+        total_bytes = output.stat().st_size
+        size_mb = total_bytes / (1024 * 1024)
+        start_t = time.monotonic()
+        print(f"[transfer] {size_mb:.1f} MB: {output.name} → {dest} …")
+        self._transfers[output.name] = {
+            "state": "running",
+            "source": str(output),
+            "destination": str(dest),
+            "pct": 0,
+            "rate_mbps": 0.0,
+        }
         try:
             proc = await asyncio.create_subprocess_exec(
-                "cp", "--preserve=timestamps", str(output), str(dest),
+                "rsync", "--inplace", str(output), str(self.transfer_dest),
                 stderr=asyncio.subprocess.PIPE,
             )
+
+            async def _poll() -> None:
+                prev_done, prev_t = 0, time.monotonic()
+                while True:
+                    await asyncio.sleep(0.5)
+                    try:
+                        done = dest.stat().st_size
+                    except FileNotFoundError:
+                        done = 0
+                    now = time.monotonic()
+                    dt = now - prev_t
+                    rate = (done - prev_done) / dt / (1024 * 1024) if dt > 0 else 0.0
+                    prev_done, prev_t = done, now
+                    self._transfers[output.name].update({
+                        "pct": int(done * 100 / total_bytes) if total_bytes else 100,
+                        "rate_mbps": round(rate, 1),
+                    })
+
+            poll_task = asyncio.create_task(_poll())
             try:
                 _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=300.0)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                raise RuntimeError("transfer timed out after 300 s")
+                raise RuntimeError("timed out after 300 s")
+            finally:
+                poll_task.cancel()
+
             if proc.returncode != 0:
                 err = (stderr_bytes or b"").decode(errors="replace").strip()
-                raise RuntimeError(f"cp exited {proc.returncode}: {err}")
-            output.unlink()
-            extraction["transferred"] = str(dest)
-            print(f"  → transferred OK → {dest.name}")
+                raise RuntimeError(f"rsync exited {proc.returncode}: {err}")
+
+            elapsed = time.monotonic() - start_t
+            avg_mbps = size_mb / elapsed if elapsed > 0 else 0.0
+            self._transfers[output.name].update({
+                "state": "done",
+                "pct": 100,
+                "size_mb": round(size_mb, 1),
+                "elapsed_s": round(elapsed, 1),
+                "avg_mbps": round(avg_mbps, 1),
+            })
+            print(f"[transfer] done — {size_mb:.1f} MB in {elapsed:.1f}s ({avg_mbps:.1f} MB/s)")
         except Exception as exc:
-            extraction["transfer_error"] = str(exc)
-            print(f"  → transfer failed: {exc}", file=sys.stderr)
+            self._transfers[output.name].update({"state": "failed", "error": str(exc)})
+            print(f"[transfer] failed: {exc}", file=sys.stderr)
 
     # ---- capture lifecycle ----
 
@@ -427,7 +468,7 @@ class AppContext:
 
         extractions = [
             {"in": round(s, 3), "out": round(e, 3),
-             "output": None, "transferred": None, "status": "pending"}
+             "output": None, "status": "pending"}
             for s, e in segments
         ]
         self._write_meta(extractions=extractions)
@@ -457,7 +498,6 @@ class AppContext:
                     self._write_recording_meta(output, start, end)
                 except Exception:
                     pass
-                await self._transfer_recording(output, extractions[i])
             else:
                 print(f"  → extraction failed (rc={proc.returncode})", file=sys.stderr)
                 if stderr_bytes:
@@ -736,6 +776,35 @@ class HTTPServer:
 
             elif clean == "/view":
                 await self._serve_file(writer, WEB_DIR / "view.html")
+
+            elif clean == "/api/config" and method == "GET":
+                await self._respond(writer, 200, json.dumps({
+                    "transfer_dest": str(ctx.transfer_dest) if ctx.transfer_dest else None,
+                }).encode())
+
+            elif clean.startswith("/api/recording/") and clean.endswith("/transfer"):
+                name = clean.removeprefix("/api/recording/").removesuffix("/transfer")
+                if not _NAME_RE.match(name):
+                    await self._respond(writer, 400, b'{"error":"invalid filename"}')
+                elif method == "GET":
+                    state = ctx._transfers.get(name, {"state": "idle"})
+                    await self._respond(writer, 200, json.dumps(state).encode())
+                elif method == "POST":
+                    if not ctx.transfer_dest:
+                        await self._respond(writer, 412, b'{"error":"no transfer_dest configured"}')
+                    elif ctx._transfers.get(name, {}).get("state") == "running":
+                        await self._respond(writer, 409, b'{"error":"transfer already running"}')
+                    else:
+                        output = ctx.output_dir / name
+                        if not output.exists():
+                            await self._respond(writer, 404, b'{"error":"file not found"}')
+                        else:
+                            asyncio.create_task(ctx._transfer_recording(output))
+                            await self._respond(writer, 200, json.dumps(
+                                ctx._transfers.get(name, {"state": "idle"})
+                            ).encode())
+                else:
+                    await self._respond(writer, 405, b'{"error":"method not allowed"}')
 
             elif clean.startswith("/api/meta/") and method == "GET":
                 name = clean.removeprefix("/api/meta/")

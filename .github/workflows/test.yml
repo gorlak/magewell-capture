@@ -20,7 +20,8 @@ jobs:
             libasound2t64 \
             libudev1 \
             libv4l-0 \
-            ffmpeg
+            ffmpeg \
+            rsync
 
       - name: Install uv
         run: pipx install uv

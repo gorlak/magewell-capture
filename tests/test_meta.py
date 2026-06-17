@@ -169,10 +169,8 @@ class TestWriteRecordingMeta:
 # ---------------------------------------------------------------------------
 
 class TestRunFinalization:
-    def _make_ctx(self, tmp_path: Path, stub_mp4: Path) -> tuple[AppContext, Path, Path]:
-        dest = tmp_path / "transfer"
-        dest.mkdir()
-        ctx = AppContext(tmp_path, transfer_dest=dest)
+    def _make_ctx(self, tmp_path: Path, stub_mp4: Path) -> tuple[AppContext, Path]:
+        ctx = AppContext(tmp_path)
         ctx.app_state = AppState.CAPTURING
         ctx.session = SessionState(time.monotonic())
         ctx.session.segments.append((2.0, 6.0))
@@ -180,38 +178,32 @@ class TestRunFinalization:
         ctx.meta_path = tmp_path / "session_stub.json"
         ctx.signal_info = (320, 240, 30.0, False)
         ctx.started_at = datetime.now()
-        return ctx, ctx.meta_path, dest
+        return ctx, ctx.meta_path
 
     async def test_extraction_produces_file(self, tmp_path, stub_mp4):
-        ctx, _, dest = self._make_ctx(tmp_path, stub_mp4)
+        ctx, _ = self._make_ctx(tmp_path, stub_mp4)
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
-        assert len(list(dest.glob("recording_*.mp4"))) == 1
+        assert len(list(tmp_path.glob("recording_*.mp4"))) == 1
 
     async def test_meta_status_done(self, tmp_path, stub_mp4):
-        ctx, meta_path, _ = self._make_ctx(tmp_path, stub_mp4)
+        ctx, meta_path = self._make_ctx(tmp_path, stub_mp4)
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
         meta = json.loads(meta_path.read_text())
         assert meta["extractions"][0]["status"] == "done"
 
-    async def test_transferred_path_in_meta(self, tmp_path, stub_mp4):
-        ctx, meta_path, _ = self._make_ctx(tmp_path, stub_mp4)
-        with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
-            await ctx._run_finalization()
-        meta = json.loads(meta_path.read_text())
-        assert meta["extractions"][0]["transferred"] is not None
-
-    async def test_local_copy_removed(self, tmp_path, stub_mp4):
-        ctx, meta_path, _ = self._make_ctx(tmp_path, stub_mp4)
+    async def test_local_copy_retained(self, tmp_path, stub_mp4):
+        # Transfer is now manual — finalization must not remove the local file.
+        ctx, meta_path = self._make_ctx(tmp_path, stub_mp4)
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
         meta = json.loads(meta_path.read_text())
         local = tmp_path / meta["extractions"][0]["output"]
-        assert not local.exists()
+        assert local.exists()
 
     async def test_state_returns_to_index(self, tmp_path, stub_mp4):
-        ctx, _, _ = self._make_ctx(tmp_path, stub_mp4)
+        ctx, _ = self._make_ctx(tmp_path, stub_mp4)
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
         assert ctx.app_state is AppState.INDEX
