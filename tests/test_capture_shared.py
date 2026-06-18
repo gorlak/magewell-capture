@@ -221,11 +221,13 @@ class TestBuildExtractCmd:
         )
         assert cmd[-1] == "/tmp/out.mp4"
 
-    def test_faststart(self):
+    def test_no_faststart(self):
+        # faststart remuxes the whole file a second time (30-60 s for large
+        # recordings); browsers handle moov-at-end via HTTP Range requests.
         cmd = build_extract_cmd(
             Path("/tmp/session.mp4"), 0, 5, Path("/tmp/out.mp4")
         )
-        assert "+faststart" in cmd
+        assert "+faststart" not in cmd
 
     def test_no_reset_timestamps(self):
         # -reset_timestamps 1 resets each stream independently to PTS=0,

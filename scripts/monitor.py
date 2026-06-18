@@ -156,9 +156,9 @@ class SessionState:
 async def _parse_ffmpeg_progress(
     reader: asyncio.StreamReader,
     rec_duration: float,
-    progress: dict,
+    *targets: dict,
 ) -> None:
-    """Consume ffmpeg -progress pipe output and keep progress dict current."""
+    """Consume ffmpeg -progress pipe output and update all target dicts."""
     out_time_us = 0
     speed = 0.0
     async for line_bytes in reader:
@@ -177,12 +177,18 @@ async def _parse_ffmpeg_progress(
             except ValueError:
                 pass
         elif key == "progress":
-            pct = min(99, int(out_time_us / (rec_duration * 1_000_000) * 100)) if rec_duration > 0 else 0
-            eta_s: int | None = None
-            if speed > 0 and rec_duration > 0:
-                remaining_us = max(0, rec_duration * 1_000_000 - out_time_us)
-                eta_s = round(remaining_us / speed / 1_000_000)
-            progress.update({"pct": pct, "speed": round(speed, 1), "eta_s": eta_s})
+            if val.strip() == "end":
+                for t in targets:
+                    t.update({"pct": 100, "speed": None, "eta_s": None})
+            else:
+                pct = min(99, int(out_time_us / (rec_duration * 1_000_000) * 100)) if rec_duration > 0 else 0
+                eta_s: int | None = None
+                if speed > 0 and rec_duration > 0:
+                    remaining_us = max(0, rec_duration * 1_000_000 - out_time_us)
+                    eta_s = round(remaining_us / speed / 1_000_000)
+                update = {"pct": pct, "speed": round(speed, 1), "eta_s": eta_s}
+                for t in targets:
+                    t.update(update)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +197,10 @@ async def _parse_ffmpeg_progress(
 
 class AppContext:
     """Shared state for the entire server lifetime."""
+
+    # Overridable in tests to avoid 45+10 second waits.
+    _SIGINT_TIMEOUT: float = 45.0
+    _SIGKILL_TIMEOUT: float = 10.0
 
     def __init__(
         self, sessions_dir: Path, storage_dir: Path | None = None, synthetic: bool = False,
@@ -417,6 +427,10 @@ class AppContext:
 
         self.app_state = AppState.CAPTURING
 
+    def _set_stop_phase(self, phase: str) -> None:
+        if self._finalize_progress.get("step") == "stopping_ffmpeg":
+            self._finalize_progress["stop_phase"] = phase
+
     async def stop_ffmpeg(self) -> None:
         """Send SIGINT, let _pipe_task drain stdout, wait for exit."""
         if self.proc is None or self.proc.returncode is not None:
@@ -426,6 +440,7 @@ class AppContext:
         # no gap where stdout goes unread between pipe_task cancel and a drain task
         # start — that gap could fill the pipe buffer and block ffmpeg from exiting.
         self._stopping_ffmpeg = True
+        self._set_stop_phase("sigint")
 
         pid = self.proc.pid
         try:
@@ -437,7 +452,7 @@ class AppContext:
               file=sys.stderr)
         t0 = time.monotonic()
         try:
-            await asyncio.wait_for(self.proc.wait(), timeout=15.0)
+            await asyncio.wait_for(self.proc.wait(), timeout=self._SIGINT_TIMEOUT)
             elapsed = time.monotonic() - t0
             rc = self.proc.returncode
             print(f"[monitor] ffmpeg exited (rc={rc}) in {elapsed:.1f} s", file=sys.stderr)
@@ -445,13 +460,15 @@ class AppContext:
             elapsed = time.monotonic() - t0
             print(f"[monitor] ffmpeg (pid {pid}) did not exit after {elapsed:.0f} s, killing...",
                   file=sys.stderr)
+            self._set_stop_phase("sigkill")
             self.proc.kill()
             try:
-                await asyncio.wait_for(self.proc.wait(), timeout=10.0)
+                await asyncio.wait_for(self.proc.wait(), timeout=self._SIGKILL_TIMEOUT)
             except asyncio.TimeoutError:
                 # Process is stuck in an unkillable kernel state (e.g. V4L2/ALSA close).
                 # Proceed with finalization — the orphaned process will be cleaned up
                 # when the kernel call eventually unblocks or the device is reset.
+                self._set_stop_phase("zombie")
                 print(f"[monitor] ffmpeg (pid {pid}) still running after SIGKILL; proceeding",
                       file=sys.stderr)
         finally:
@@ -483,9 +500,22 @@ class AppContext:
             session_mb = round(self.session_file.stat().st_size / (1024 * 1024))
         except OSError:
             session_mb = None
+
+        w, h, fps, _ = self.signal_info
+        signal_str = f"{w}×{h} @ {fps:.0f} fps"
+        recordings_init = [
+            {"index": i, "status": "pending",
+             "start": round(s, 1), "end": round(e, 1), "duration": round(e - s, 1)}
+            for i, (s, e) in enumerate(self.session.segments)
+        ]
         self._finalize_progress = {
-            "step": "stopping_ffmpeg", "recording": None, "total": total,
-            "started_at": time.time(), "session_mb": session_mb,
+            "step": "stopping_ffmpeg",
+            "total": total,
+            "started_at": time.time(),
+            "session_mb": session_mb,
+            "session": self.session_file.name,
+            "signal": signal_str,
+            "recordings": recordings_init,
         }
         self.app_state = AppState.FINALIZING
         self.finalize_task = asyncio.create_task(self._run_finalization())
@@ -503,13 +533,11 @@ class AppContext:
         self.app_state = AppState.INDEX
 
     async def _run_finalization(self) -> None:
-        """Background task: stop ffmpeg, extract all segments, → REPORT."""
+        """Background task: stop ffmpeg, extract all segments, stay in FINALIZING."""
         assert self.session and self.session_file and self.signal_info and self.meta_path
 
-        w, h, fps, interlaced = self.signal_info
         segments = list(self.session.segments)
         session_file = self.session_file
-        sessions_dir = self.sessions_dir
 
         await self.stop_ffmpeg()
 
@@ -521,15 +549,47 @@ class AppContext:
         self._write_meta(extractions=extractions)
 
         total = len(segments)
-        # update without replacing — preserves started_at from complete_capture
-        self._finalize_progress.update({"step": "extracting", "recording": 0, "total": total})
+        # Live per-recording list seeded by complete_capture(); update it in-place.
+        recordings = self._finalize_progress.get("recordings", [])
+
+        # Verify the session file is readable before attempting extraction.
+        # The session file is written as fragmented MP4 (empty_moov + moof/mdat
+        # per keyframe), so it is always valid even after SIGKILL.  A non-zero
+        # ffprobe result here indicates a truly corrupt file: zero bytes written
+        # (disk full, immediate crash), or a wrong path.
+        _probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1", str(session_file),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, _probe_err = await _probe.communicate()
+        if _probe.returncode != 0:
+            print(
+                f"[monitor] session file is unreadable — extraction skipped: "
+                f"{_probe_err.decode(errors='replace').strip()}",
+                file=sys.stderr,
+            )
+            for extraction in extractions:
+                extraction["status"] = "failed"
+            for rec in recordings:
+                rec["status"] = "failed"
+            self._write_meta(extractions=extractions)
+            self._finalize_progress.update({
+                "step": "error",
+                "error": "Session file is unreadable (possibly zero bytes — disk full?). "
+                         "Recordings cannot be extracted.",
+            })
+            return
+
+        self._finalize_progress.update({"step": "extracting"})
 
         for i, (start, end) in enumerate(segments):
             rec_duration = end - start
+            rec = recordings[i] if i < len(recordings) else {}
+            rec["status"] = "extracting"
             self._finalize_progress.update({
                 "recording": i + 1,
                 "pct": 0, "speed": None, "eta_s": None,
-                "rec_duration_s": round(rec_duration, 1),
             })
             output = make_recording_path(session_file, i + 1, start)
             print(f"[monitor] extracting {i+1}/{total}: "
@@ -545,15 +605,17 @@ class AppContext:
             )
             stderr_bytes, _ = await asyncio.gather(
                 proc.stderr.read(),
-                _parse_ffmpeg_progress(proc.stdout, rec_duration, self._finalize_progress),
+                _parse_ffmpeg_progress(proc.stdout, rec_duration,
+                                        self._finalize_progress, rec),
             )
             await proc.wait()
 
             if proc.returncode == 0:
-                self._finalize_progress["pct"] = 100
                 size_mb = output.stat().st_size / (1024 * 1024)
                 print(f"  → {output.name} ({size_mb:.1f} MB)")
                 extractions[i].update({"output": output.name, "status": "done"})
+                rec.update({"status": "done", "pct": 100,
+                             "speed": None, "eta_s": None, "output": output.name})
                 try:
                     self._write_recording_meta(output, start, end)
                 except Exception:
@@ -563,16 +625,49 @@ class AppContext:
                 if stderr_bytes:
                     print(f"  {stderr_bytes.decode(errors='replace').strip()}", file=sys.stderr)
                 extractions[i]["status"] = "failed"
+                rec["status"] = "failed"
 
             self._write_meta(extractions=extractions)
 
             if i < total - 1:
                 await asyncio.sleep(1.1)
 
-        self._finalize_progress = {"step": "done", "recording": total, "total": total}
-        self.app_state = AppState.INDEX
-        print("[monitor] FINALIZING complete → INDEX")
-        self._reset_capture()
+        # Preserve session/signal context already in _finalize_progress; just flip step.
+        for key in ("pct", "speed", "eta_s", "recording"):
+            self._finalize_progress.pop(key, None)
+
+        # Remux session file from fragmented MP4 to regular MP4 so browsers can seek
+        # it like a recording file.  The fragmented format is only needed during
+        # capture (SIGKILL resilience); once ffmpeg has exited we don't need it.
+        # Peak disk usage: 2× session file size during the copy; drops back to 1× on rename.
+        self._finalize_progress["step"] = "remuxing_session"
+        remux_tmp = session_file.with_suffix(".remux.mp4")
+        try:
+            remux_proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner",
+                "-i", str(session_file),
+                "-c", "copy",
+                str(remux_tmp),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, remux_err = await remux_proc.communicate()
+            if remux_proc.returncode == 0:
+                remux_tmp.replace(session_file)
+                print(f"[monitor] session file remuxed to regular MP4: {session_file.name}",
+                      file=sys.stderr)
+            else:
+                remux_tmp.unlink(missing_ok=True)
+                print(f"[monitor] session remux failed (rc={remux_proc.returncode}); "
+                      f"keeping original fragmented file", file=sys.stderr)
+                if remux_err:
+                    print(f"  {remux_err.decode(errors='replace').strip()}", file=sys.stderr)
+        except Exception as exc:
+            remux_tmp.unlink(missing_ok=True)
+            print(f"[monitor] session remux error: {exc}; keeping original", file=sys.stderr)
+
+        self._finalize_progress["step"] = "done"
+        # State stays FINALIZING; user dismisses via /api/dismiss to return to INDEX.
 
     def _reset_capture(self) -> None:
         self.session = None
@@ -828,6 +923,16 @@ class HTTPServer:
                     await self._respond(writer, 409, b'{"error":"not CAPTURING"}')
                 else:
                     await ctx.abort_capture()
+                    await self._respond(writer, 200, json.dumps(ctx.status_dict()).encode())
+
+            elif clean == "/api/dismiss" and method == "POST":
+                if ctx.app_state is not AppState.FINALIZING:
+                    await self._respond(writer, 409, b'{"error":"not FINALIZING"}')
+                elif ctx._finalize_progress.get("step") not in ("done", "error"):
+                    await self._respond(writer, 409, b'{"error":"finalization still in progress"}')
+                else:
+                    ctx._reset_capture()
+                    ctx.app_state = AppState.INDEX
                     await self._respond(writer, 200, json.dumps(ctx.status_dict()).encode())
 
             elif clean in ("/api/mark-in", "/api/mark-out"):

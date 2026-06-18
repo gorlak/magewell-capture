@@ -5,12 +5,14 @@ _run_finalization (extraction + transfer) with a lavfi-generated stub MP4.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -205,8 +207,136 @@ class TestRunFinalization:
         local = tmp_path / Path(meta["extractions"][0]["output"]).name
         assert local.exists()
 
-    async def test_state_returns_to_index(self, tmp_path, stub_mp4):
+    async def test_state_stays_finalizing_until_dismissed(self, tmp_path, stub_mp4):
         ctx, _ = self._make_ctx(tmp_path, stub_mp4)
+        ctx.app_state = AppState.FINALIZING
         with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
             await ctx._run_finalization()
-        assert ctx.app_state is AppState.INDEX
+
+        assert ctx._finalize_progress["step"] == "done"
+        # Multiple polls all return FINALIZING — user must dismiss explicitly.
+        for _ in range(3):
+            s = ctx.status_dict()
+            assert s["state"] == "FINALIZING" and s["step"] == "done"
+        # Dismiss transitions to INDEX.
+        ctx._reset_capture()
+        ctx.app_state = AppState.INDEX
+        assert ctx.status_dict()["state"] == "INDEX"
+
+    def _make_ctx_empty_session(self, tmp_path: Path, filename: str = "session_empty.mp4") -> AppContext:
+        """Ctx with a zero-byte session file so ffprobe fails (no moov)."""
+        ctx = AppContext(tmp_path)
+        ctx.app_state = AppState.FINALIZING
+        ctx.session = SessionState(time.monotonic())
+        ctx.session.segments.append((2.0, 6.0))
+        empty = tmp_path / filename
+        empty.touch()
+        ctx.session_file = empty
+        ctx.meta_path = tmp_path / empty.with_suffix(".json").name
+        ctx.signal_info = (320, 240, 30.0, False)
+        ctx.started_at = datetime.now()
+        return ctx
+
+    async def test_incomplete_session_sets_error_step(self, tmp_path):
+        """Zero-byte session (no moov) → ffprobe fails → step=error, no extraction."""
+        ctx = self._make_ctx_empty_session(tmp_path)
+        with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
+            await ctx._run_finalization()
+
+        assert ctx._finalize_progress["step"] == "error"
+        assert "unreadable" in ctx._finalize_progress.get("error", "").lower()
+        meta = json.loads(ctx.meta_path.read_text())
+        assert all(e["status"] == "failed" for e in meta["extractions"])
+        # No recording files should have been created.
+        assert not list(tmp_path.glob("*_starting_*.mp4"))
+
+    async def test_error_step_stays_finalizing_until_dismissed(self, tmp_path):
+        """step=error stays FINALIZING indefinitely; dismissed explicitly → INDEX."""
+        ctx = self._make_ctx_empty_session(tmp_path, "session_err.mp4")
+        with patch.object(ctx, "stop_ffmpeg", new_callable=AsyncMock):
+            await ctx._run_finalization()
+
+        assert ctx._finalize_progress["step"] == "error"
+        for _ in range(3):
+            s = ctx.status_dict()
+            assert s["state"] == "FINALIZING" and s["step"] == "error"
+        ctx._reset_capture()
+        ctx.app_state = AppState.INDEX
+        assert ctx.status_dict()["state"] == "INDEX"
+
+
+# ---------------------------------------------------------------------------
+# stop_ffmpeg
+# ---------------------------------------------------------------------------
+
+class TestStopFfmpeg:
+    """Unit tests for stop_ffmpeg with mocked subprocess.
+
+    _SIGINT_TIMEOUT and _SIGKILL_TIMEOUT are set to 50 ms so tests run fast
+    without changing real-world behaviour in production.
+    """
+
+    def _make_ctx(self, tmp_path: Path) -> AppContext:
+        ctx = AppContext(tmp_path)
+        ctx._SIGINT_TIMEOUT = 0.05
+        ctx._SIGKILL_TIMEOUT = 0.05
+        return ctx
+
+    def _mock_proc(self, wait_coro_factory) -> MagicMock:
+        """Return a mock asyncio.Process with the given wait() coroutine factory."""
+        proc = MagicMock()
+        proc.returncode = None
+        proc.pid = 12345
+        proc.wait = wait_coro_factory
+        return proc
+
+    async def test_clean_sigint_exit(self, tmp_path):
+        """Proc exits immediately after SIGINT — kill() is never called."""
+        ctx = self._make_ctx(tmp_path)
+
+        async def _wait():
+            return 0  # exits right away
+
+        ctx.proc = self._mock_proc(_wait)
+        await ctx.stop_ffmpeg()
+
+        ctx.proc.send_signal.assert_called_once_with(signal.SIGINT)
+        ctx.proc.kill.assert_not_called()
+
+    async def test_sigkill_fallback(self, tmp_path):
+        """Proc ignores SIGINT (SIGINT timeout fires) — kill() is called once, then proc exits."""
+        ctx = self._make_ctx(tmp_path)
+        _calls = [0]
+
+        async def _wait():
+            _calls[0] += 1
+            if _calls[0] == 1:
+                await asyncio.sleep(9999)  # hangs on first call → SIGINT timeout fires
+            # second call (after kill) returns immediately
+
+        ctx.proc = self._mock_proc(_wait)
+        await ctx.stop_ffmpeg()
+
+        ctx.proc.send_signal.assert_called_once_with(signal.SIGINT)
+        ctx.proc.kill.assert_called_once()
+
+    async def test_dstate_both_timeouts_fire(self, tmp_path):
+        """D-state sim: both SIGINT and SIGKILL timeouts expire, stop_ffmpeg still returns.
+
+        This was the original hang bug — before the inner TimeoutError was caught,
+        stop_ffmpeg would raise and finalization would never run.
+        """
+        ctx = self._make_ctx(tmp_path)
+
+        async def _wait():
+            await asyncio.sleep(9999)  # never exits (D-state)
+
+        ctx.proc = self._mock_proc(_wait)
+
+        t0 = time.monotonic()
+        await ctx.stop_ffmpeg()
+        elapsed = time.monotonic() - t0
+
+        # Should return promptly after both short timeouts, not block forever.
+        assert elapsed < 1.0, f"stop_ffmpeg blocked for {elapsed:.2f}s despite short timeouts"
+        ctx.proc.kill.assert_called_once()

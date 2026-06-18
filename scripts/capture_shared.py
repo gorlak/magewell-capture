@@ -217,7 +217,12 @@ def build_monitor_cmd(
 
     Two separate encode+mux paths (the tee muxer doesn't forward codec
     extradata, producing an empty hvcC that MSE rejects):
-      1. Plain MP4 file (session recording)
+      1. Fragmented MP4 file (session recording) — frag_keyframe+empty_moov so
+         the file is always valid/extractable even if ffmpeg is SIGKILL'd in
+         V4L2 D-state.  The initial moov box is written immediately at byte 0;
+         each keyframe flushes a self-contained moof/mdat pair to disk.
+         global_sidx writes a byte-range index at the end on clean exit so
+         browsers can seek within the session file; absent on SIGKILL.
       2. Fragmented MP4 to pipe for WebSocket+MSE preview
 
     Uses two NVENC sessions (T400 supports 3 concurrent).
@@ -231,7 +236,10 @@ def build_monitor_cmd(
 
     encode = build_software_encode_args(fps) if synthetic else build_encode_args(fps)
     cmd += encode
-    cmd += [str(output)]
+    cmd += [
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof+global_sidx",
+        str(output),
+    ]
     cmd += encode
     cmd += [
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
@@ -267,6 +275,12 @@ def build_extract_cmd(
 
     A small pad (0.15 s) is added to the end to avoid dropping the last audio
     packet when the cut falls on a packet boundary.
+
+    No `-movflags +faststart`: faststart remuxes the whole file a second time
+    to move moov to the front, which adds 30-60 s of wall-clock time for large
+    recordings.  Modern browsers handle moov-at-end via HTTP Range requests
+    (they fetch the last few bytes to read moov, then seek within the file
+    normally), so the trade-off is not worth it for local playback.
     """
     return [
         "ffmpeg", "-hide_banner",
@@ -275,7 +289,6 @@ def build_extract_cmd(
         "-to", f"{end + 0.15:.3f}",
         "-c", "copy",
         "-avoid_negative_ts", "make_zero",
-        "-movflags", "+faststart",
         str(output),
     ]
 

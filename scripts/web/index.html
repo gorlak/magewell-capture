@@ -164,25 +164,46 @@
   /* ---- FINALIZING ---- */
   #page-finalizing {
     align-items: center;
-    justify-content: center;
-    height: 100vh;
-    height: 100dvh;
-    gap: 16px;
+    padding: 40px 24px;
+    gap: 0;
+    overflow-y: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
   }
-  #finalizing-msg { font-size: 20px; color: #ccc; }
-  #finalizing-detail { font-size: 14px; color: #666; }
-  #finalizing-bar-wrap {
-    width: min(400px, 80vw);
-    height: 4px;
-    background: #1e293b;
-    border-radius: 2px;
-    overflow: hidden;
-    display: none;
+  #fin-content {
+    width: 100%; max-width: 760px;
   }
-  #finalizing-bar { height: 100%; background: #60a5fa; width: 0%; transition: width 0.6s linear; }
-  #finalizing-stats { font-size: 12px; color: #555; font-family: monospace; display: none; }
+  #fin-back-row { margin-bottom: 20px; }
+  .fin-back-link { color: #60a5fa; text-decoration: none; font-size: 14px; }
+  .fin-back-link:hover { color: #93c5fd; }
+  .fin-back-link.disabled { color: #334155; pointer-events: none; cursor: default; }
+  #fin-session-name {
+    font-size: 15px; font-weight: 600; color: #e2e8f0;
+    margin-bottom: 4px; word-break: break-all;
+  }
+  #fin-session-meta { font-size: 12px; color: #475569; margin-bottom: 20px; }
+  #fin-status-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 12px; min-height: 22px;
+  }
+  #fin-spinner { display: none; flex-shrink: 0; }
+  #fin-status-text { font-size: 15px; color: #94a3b8; }
+  #fin-error { color: #ef4444; font-size: 13px; margin-bottom: 12px; display: none; }
+  #fin-recordings { width: 100%; }
+  .fin-rec { padding: 10px 0; border-top: 1px solid #1a2030; }
+  .fin-rec-hdr { font-size: 13px; color: #64748b; margin-bottom: 5px; font-family: monospace; }
+  .fin-rec-bar-wrap {
+    width: 100%; height: 3px; background: #1e293b;
+    border-radius: 2px; overflow: hidden; margin-bottom: 4px;
+  }
+  .fin-rec-bar { height: 100%; background: #60a5fa; width: 0%; transition: width 0.5s linear; }
+  .fin-rec-bar.done { background: #22c55e; transition: none; }
+  .fin-rec-stat { font-size: 12px; color: #475569; font-family: monospace; }
+  .fin-rec-stat.done { color: #22c55e; }
+  .fin-rec-stat.failed { color: #ef4444; }
+  .fin-rec-out { font-size: 11px; color: #334155; margin-top: 2px; font-family: monospace; word-break: break-all; }
   .spinner {
-    width: 40px; height: 40px; border: 3px solid #333;
+    width: 20px; height: 20px; border: 2px solid #333;
     border-top-color: #60a5fa; border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -242,11 +263,17 @@
 
 <!-- FINALIZING -->
 <div id="page-finalizing" class="page">
-  <div class="spinner"></div>
-  <div id="finalizing-msg">Finalizing capture…</div>
-  <div id="finalizing-detail"></div>
-  <div id="finalizing-bar-wrap"><div id="finalizing-bar"></div></div>
-  <div id="finalizing-stats"></div>
+  <div id="fin-content">
+    <div id="fin-back-row"><a href="#" id="btn-fin-back" class="fin-back-link disabled">← back</a></div>
+    <div id="fin-session-name"></div>
+    <div id="fin-session-meta"></div>
+    <div id="fin-status-row">
+      <div class="spinner" id="fin-spinner"></div>
+      <span id="fin-status-text">Finalizing…</span>
+    </div>
+    <div id="fin-error"></div>
+    <div id="fin-recordings"></div>
+  </div>
 </div>
 
 <script>
@@ -283,11 +310,23 @@
   var abortBtn     = document.getElementById('abort-btn');
 
   // FINALIZING
-  var finalizingBarWrap = document.getElementById('finalizing-bar-wrap');
-  var finalizingBar     = document.getElementById('finalizing-bar');
-  var finalizingStats   = document.getElementById('finalizing-stats');
-  var finalizingMsg    = document.getElementById('finalizing-msg');
-  var finalizingDetail = document.getElementById('finalizing-detail');
+  var btnFinBack      = document.getElementById('btn-fin-back');
+  var finSessionName  = document.getElementById('fin-session-name');
+  var finSessionMeta  = document.getElementById('fin-session-meta');
+  var finSpinner      = document.getElementById('fin-spinner');
+  var finStatusText   = document.getElementById('fin-status-text');
+  var finError        = document.getElementById('fin-error');
+  var finRecordings   = document.getElementById('fin-recordings');
+
+  var _lastFinData = null;
+
+  btnFinBack.addEventListener('click', function(e) {
+    e.preventDefault();
+    var d = _lastFinData;
+    if (!d || (d.step !== 'done' && d.step !== 'error')) return;
+    apiPost('/api/dismiss');
+    // Next poll returns INDEX and showPage switches automatically.
+  });
 
   // ---- state ----
   var currentPage = 'INDEX';
@@ -541,43 +580,101 @@
     return m + ':' + String(s).padStart(2,'0');
   }
 
+  function fmtSecs(s) {
+    s = Math.max(0, s);
+    return s < 60 ? (s < 10 ? s.toFixed(1) : Math.round(s)) + 's' : fmtDuration(s);
+  }
+
   function updateFinalizing(data) {
+    _lastFinData = data;
+    var isDone = data.step === 'done' || data.step === 'error';
+    var isActive = data.step === 'stopping_ffmpeg' || data.step === 'extracting' || data.step === 'remuxing_session';
+
+    btnFinBack.classList.toggle('disabled', !isDone);
+
+    // Session summary
+    finSessionName.textContent = data.session || '';
+    var metaParts = [];
+    if (data.signal) metaParts.push(data.signal);
+    if (data.total) metaParts.push(data.total + ' recording' + (data.total === 1 ? '' : 's'));
+    if (data.session_mb) metaParts.push((data.session_mb / 1024).toFixed(1) + ' GB');
+    finSessionMeta.textContent = metaParts.join(' · ');
+
+    // Spinner + status line
+    finSpinner.style.display = isActive ? '' : 'none';
     var elapsed = data.started_at ? Math.round(Date.now() / 1000 - data.started_at) : 0;
-
     if (data.step === 'stopping_ffmpeg') {
-      finalizingMsg.textContent = 'Stopping capture…';
-      var stopParts = [];
-      if (data.total) stopParts.push(data.total + ' recording' + (data.total === 1 ? '' : 's'));
-      if (data.session_mb) stopParts.push((data.session_mb / 1024).toFixed(1) + ' GB session');
-      if (elapsed > 5) stopParts.push(fmtDuration(elapsed) + ' elapsed');
-      finalizingDetail.textContent = stopParts.join('  ·  ');
-      finalizingBarWrap.style.display = 'none';
-      finalizingStats.style.display = 'none';
-
+      var phaseMsg;
+      if (data.stop_phase === 'zombie') {
+        phaseMsg = 'ffmpeg stuck in kernel call (D-state) — proceeding…';
+      } else if (data.stop_phase === 'sigkill') {
+        phaseMsg = 'ffmpeg did not exit after 45s — sent SIGKILL…';
+      } else {
+        phaseMsg = 'Waiting for ffmpeg to finish writing…';
+      }
+      finStatusText.textContent = phaseMsg + (elapsed > 3 ? '  (' + fmtDuration(elapsed) + ')' : '');
     } else if (data.step === 'extracting') {
-      var label = 'Recording ' + data.recording + ' of ' + data.total;
-      if (data.rec_duration_s) label += '  ·  ' + fmtDuration(data.rec_duration_s);
-      if (data.session_mb) label += '  ·  ' + (data.session_mb / 1024).toFixed(1) + ' GB';
-      finalizingMsg.textContent = 'Extracting recordings…';
-      finalizingDetail.textContent = label;
-
-      finalizingBarWrap.style.display = '';
-      finalizingBar.style.width = (data.pct || 0) + '%';
-
-      var parts = [];
-      if (data.pct != null) parts.push(data.pct + '%');
-      if (data.speed) parts.push(data.speed + '×');
-      if (data.eta_s != null) parts.push('ETA ' + fmtDuration(data.eta_s));
-      if (elapsed > 0) parts.push(fmtDuration(elapsed) + ' elapsed');
-      finalizingStats.textContent = parts.join('  ·  ');
-      finalizingStats.style.display = parts.length ? '' : 'none';
-
-    } else {
-      finalizingMsg.textContent = 'Done.';
-      finalizingDetail.textContent = '';
-      finalizingBarWrap.style.display = 'none';
-      finalizingStats.style.display = 'none';
+      finStatusText.textContent = 'Extracting recordings…';
+    } else if (data.step === 'remuxing_session') {
+      finStatusText.textContent = 'Reprocessing session file…' + (elapsed > 3 ? '  (' + fmtDuration(elapsed) + ')' : '');
+    } else if (data.step === 'done') {
+      finStatusText.textContent = 'Done.';
+    } else if (data.step === 'error') {
+      finStatusText.textContent = 'Extraction failed.';
     }
+
+    // Error detail (session-level, not per-recording)
+    if (data.step === 'error' && data.error) {
+      finError.textContent = data.error;
+      finError.style.display = '';
+    } else {
+      finError.style.display = 'none';
+    }
+
+    // Per-recording list
+    renderFinRecordings(data.recordings || []);
+  }
+
+  function renderFinRecordings(recs) {
+    if (!recs.length) { finRecordings.innerHTML = ''; return; }
+    var html = '';
+    recs.forEach(function(rec, idx) {
+      var hdr = 'Recording ' + (idx + 1);
+      hdr += '  ' + fmtDuration(rec.start || 0) + ' – ' + fmtDuration(rec.end || 0);
+      if (rec.duration) hdr += '  (' + fmtSecs(rec.duration) + ')';
+
+      var showBar = rec.status === 'done' || rec.status === 'extracting';
+      var barW = rec.status === 'done' ? 100 : (rec.pct || 0);
+      var barCls = rec.status === 'done' ? 'fin-rec-bar done' : 'fin-rec-bar';
+
+      var statCls = rec.status === 'done' ? 'done' : rec.status === 'failed' ? 'failed' : '';
+      var statTxt;
+      if (rec.status === 'done') {
+        statTxt = '✓ done';
+      } else if (rec.status === 'failed') {
+        statTxt = '✗ failed';
+      } else if (rec.status === 'extracting') {
+        var p = [];
+        if (rec.pct != null) p.push(rec.pct + '%');
+        if (rec.speed) p.push(rec.speed + '×');
+        if (rec.eta_s != null) p.push('eta ' + fmtDuration(rec.eta_s));
+        statTxt = p.length ? p.join('  ') : 'extracting…';
+      } else {
+        statTxt = 'pending';
+      }
+
+      html += '<div class="fin-rec">';
+      html += '<div class="fin-rec-hdr">' + escHtml(hdr) + '</div>';
+      if (showBar) {
+        html += '<div class="fin-rec-bar-wrap"><div class="' + escHtml(barCls) + '" style="width:' + barW + '%"></div></div>';
+      }
+      html += '<div class="fin-rec-stat ' + statCls + '">' + escHtml(statTxt) + '</div>';
+      if (rec.output) {
+        html += '<div class="fin-rec-out">' + escHtml(rec.output) + '</div>';
+      }
+      html += '</div>';
+    });
+    finRecordings.innerHTML = html;
   }
 
   // ---- WebSocket + MSE ----

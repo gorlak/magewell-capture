@@ -24,9 +24,10 @@ MONITOR = ROOT / "scripts/monitor.py"
 
 # Each test gets its own port pair to avoid TIME_WAIT conflicts.
 # test_shutdown.py uses 8290/8292 so start above that.
-_PORT_SHUTDOWN = 8294
-_PORT_MOOV     = 8296
-_PORT_CYCLE    = 8298
+_PORT_SHUTDOWN   = 8294
+_PORT_MOOV       = 8296
+_PORT_CYCLE      = 8298
+_PORT_FINALIZING = 8300
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,20 @@ def _wait_for_state(port: int, state: str, timeout: float = 60.0) -> bool:
         try:
             data = _http_get_json(port, "/api/status")
             if data.get("state") == state:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _wait_for_finalizing_done(port: int, timeout: float = 60.0) -> bool:
+    """Return True once FINALIZING reaches step=done or step=error."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            data = _http_get_json(port, "/api/status")
+            if data.get("state") == "FINALIZING" and data.get("step") in ("done", "error"):
                 return True
         except Exception:
             pass
@@ -146,7 +161,28 @@ def test_synthetic_session_has_valid_moov(tmp_path):
     codec_types = {s["codec_type"] for s in info.get("streams", [])}
     assert "video" in codec_types
     assert "audio" in codec_types
-    assert float(info["format"]["duration"]) >= 2.0
+    # Fragmented MP4: moov header duration is 0 (data lives in moof/mdat boxes),
+    # so format.duration may be "N/A".  Verify content via keyframe timestamps.
+    duration_str = info.get("format", {}).get("duration", "N/A")
+    if duration_str not in ("N/A", ""):
+        assert float(duration_str) >= 2.0, f"session too short: {duration_str}s"
+    else:
+        kf = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time,flags",
+             "-of", "csv=p=0", str(sessions[0])],
+            capture_output=True, text=True,
+        )
+        key_times = [
+            float(line.split(",")[0])
+            for line in kf.stdout.splitlines()
+            if ",K" in line and line.split(",")[0] not in ("N/A", "")
+        ]
+        assert key_times, "no keyframes found in session file"
+        assert max(key_times) >= 2.0, (
+            f"last keyframe at {max(key_times):.1f}s — session too short"
+        )
 
 
 @pytest.mark.virtual_device
@@ -164,8 +200,14 @@ def test_synthetic_record_extract(tmp_path):
 
         assert _http_post(_PORT_CYCLE, "/api/complete") == 200
 
-        assert _wait_for_state(_PORT_CYCLE, "INDEX", timeout=60.0), (
-            "did not return to INDEX after finalization"
+        # Wait for FINALIZING to reach "done", then dismiss to return to INDEX.
+        assert _wait_for_finalizing_done(_PORT_CYCLE, timeout=60.0), (
+            "did not reach FINALIZING step=done after extraction"
+        )
+        assert _http_post(_PORT_CYCLE, "/api/dismiss") == 200
+
+        assert _wait_for_state(_PORT_CYCLE, "INDEX", timeout=10.0), (
+            "did not return to INDEX after dismiss"
         )
 
         # Verify the recording appears in the /api/status listing while server is
@@ -197,3 +239,48 @@ def test_synthetic_record_extract(tmp_path):
     assert sessions, f"no session meta in {tmp_path}"
     meta = json.loads(sessions[0].read_text())
     assert meta["extractions"][0]["status"] == "done"
+
+
+@pytest.mark.virtual_device
+def test_synthetic_finalizing_dismiss(tmp_path):
+    """FINALIZING stays visible after done; /api/dismiss returns to INDEX.
+
+    Guards that the page is not auto-dismissed — the server must stay in
+    FINALIZING+done until the client explicitly POSTs /api/dismiss.
+    """
+    proc = _start_synthetic(tmp_path, _PORT_FINALIZING)
+    try:
+        assert _wait_for_http(_PORT_FINALIZING), "server did not start"
+        assert _http_post(_PORT_FINALIZING, "/api/start") == 200
+        time.sleep(1.5)
+
+        assert _http_post(_PORT_FINALIZING, "/api/mark-in?t=0.5") == 200
+        time.sleep(2.0)
+        assert _http_post(_PORT_FINALIZING, "/api/mark-out?t=2.5") == 200
+        assert _http_post(_PORT_FINALIZING, "/api/complete") == 200
+
+        assert _wait_for_finalizing_done(_PORT_FINALIZING, timeout=60.0), (
+            "did not reach FINALIZING step=done"
+        )
+
+        # State must remain FINALIZING (not auto-switch to INDEX) across several polls.
+        for _ in range(3):
+            data = _http_get_json(_PORT_FINALIZING, "/api/status")
+            assert data.get("state") == "FINALIZING" and data.get("step") == "done", (
+                f"expected FINALIZING+done, got {data.get('state')}+{data.get('step')}"
+            )
+            time.sleep(0.3)
+
+        # Dismiss transitions to INDEX.
+        assert _http_post(_PORT_FINALIZING, "/api/dismiss") == 200
+        assert _wait_for_state(_PORT_FINALIZING, "INDEX", timeout=5.0), (
+            "did not reach INDEX after dismiss"
+        )
+    finally:
+        if proc.returncode is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=15.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
