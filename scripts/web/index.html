@@ -324,8 +324,7 @@
     e.preventDefault();
     var d = _lastFinData;
     if (!d || (d.step !== 'done' && d.step !== 'error')) return;
-    apiPost('/api/dismiss');
-    // Next poll returns INDEX and showPage switches automatically.
+    apiPost('/api/dismiss').then(pollStatus);
   });
 
   // ---- state ----
