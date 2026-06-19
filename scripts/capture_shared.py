@@ -156,7 +156,7 @@ def _video_encode_args(fps: float) -> list[str]:
         "-c:v", "hevc_nvenc",
         "-preset", "p6",
         "-rc", "vbr",
-        "-cq", "24",
+        "-cq", "22",
         "-b:v", "0",
         "-maxrate", "80M",
         "-bufsize", "160M",
