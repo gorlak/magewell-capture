@@ -363,11 +363,7 @@ class AppContext:
 
             poll_task = asyncio.create_task(_poll())
             try:
-                _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=300.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                raise RuntimeError("timed out after 300 s")
+                _, stderr_bytes = await proc.communicate()
             finally:
                 poll_task.cancel()
 
