@@ -327,8 +327,8 @@ class AppContext:
         print(f"[transfer] {size_mb:.1f} MB: {output.name} → {dest} …")
         self._transfers[output.name] = {
             "state": "running",
-            "source": str(output),
-            "destination": str(dest),
+            "source": str(output.resolve()),
+            "destination": str(dest.resolve()),
             "pct": 0,
             "rate_mbps": 0.0,
         }
